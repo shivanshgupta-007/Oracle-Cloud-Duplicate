@@ -1,12 +1,13 @@
 <meta charset="utf-8">
 <title>Ledgerline Suite</title>
+<script>document.documentElement.lang = 'en';</script>
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
 <style>
 /* Layout: fixed left module rail + sticky top bar + scrolling work area; detail drawer slides in from the right. */
 :root {
-  --bg: #eef2f1; --surface: #ffffff; --surface-2: #f6f8f7; --ink: #14201d; --muted: #586864; --faint: #8a9894;
+  --bg: #eef2f1; --surface: #ffffff; --surface-2: #f6f8f7; --ink: #14201d; --muted: #586864; --faint: #5d6c67; --field: #84928e;
   --line: #d9e1df; --line-2: #e8eeec;
   --accent: #0d6857; --accent-ink: #ffffff; --accent-soft: #dcefe9; --accent-text: #0a5a4b;
   --rail: #10302a; --rail-ink: #c9dfd9; --rail-muted: #7fa39a; --rail-hi: #1b463d;
@@ -17,7 +18,7 @@
   --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
 }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
-  --bg: #0d1312; --surface: #141c1a; --surface-2: #19221f; --ink: #e2ebe8; --muted: #9aaba6; --faint: #6e7f7a;
+  --bg: #0d1312; --surface: #141c1a; --surface-2: #19221f; --ink: #e2ebe8; --muted: #9aaba6; --faint: #8c9c97; --field: #5f706b;
   --line: #26322f; --line-2: #1e2826;
   --accent: #46b89f; --accent-ink: #04201a; --accent-soft: #163631; --accent-text: #6fd0b9;
   --rail: #0a0f0e; --rail-ink: #c3d6d1; --rail-muted: #6c8780; --rail-hi: #16302a;
@@ -25,7 +26,7 @@
   --series-1: #3987e5; --series-2: #d95926;
   --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35); color-scheme: dark; } }
 :root[data-theme="dark"] {
-  --bg: #0d1312; --surface: #141c1a; --surface-2: #19221f; --ink: #e2ebe8; --muted: #9aaba6; --faint: #6e7f7a;
+  --bg: #0d1312; --surface: #141c1a; --surface-2: #19221f; --ink: #e2ebe8; --muted: #9aaba6; --faint: #8c9c97; --field: #5f706b;
   --line: #26322f; --line-2: #1e2826;
   --accent: #46b89f; --accent-ink: #04201a; --accent-soft: #163631; --accent-text: #6fd0b9;
   --rail: #0a0f0e; --rail-ink: #c3d6d1; --rail-muted: #6c8780; --rail-hi: #16302a;
@@ -60,9 +61,9 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .main { min-width: 0; display: flex; flex-direction: column; }
 .top { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 20; background: var(--surface); border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 12px; padding: 10px max(20px, env(safe-area-inset-right, 0px)) 10px 20px; }
 body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 30; background: var(--surface); }
-.menu-btn { display: none; }
+.btn.menu-btn { display: none; }
 .search { position: relative; flex: 1; max-width: 460px; }
-.search input { width: 100%; padding: 7px 10px 7px 32px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-2); }
+.search input { width: 100%; padding: 7px 10px 7px 32px; border: 1px solid var(--field); border-radius: 7px; background: var(--surface-2); }
 .search svg { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: var(--faint); }
 .search-results { position: absolute; top: calc(100% + 4px); left: 0; right: 0; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); max-height: 60vh; overflow-y: auto; z-index: 40; }
 .search-results button { display: block; width: 100%; text-align: left; border: 0; background: none; padding: 8px 12px; cursor: pointer; border-bottom: 1px solid var(--line-2); }
@@ -130,7 +131,7 @@ table.t { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 .row { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
 .field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .field > span { font-size: 12px; font-weight: 600; color: var(--muted); }
-.field input, .field select, .field textarea, .cell-in { padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); width: 100%; min-width: 0; }
+.field input, .field select, .field textarea, .cell-in { padding: 7px 9px; border: 1px solid var(--field); border-radius: 6px; background: var(--surface); width: 100%; min-width: 0; }
 .cell-in { padding: 5px 7px; }
 .field input:focus, .field select:focus, .cell-in:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px var(--accent-soft); }
 .hint { font-size: 12px; color: var(--muted); }
@@ -146,7 +147,7 @@ table.t { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 .drawer footer { padding: 12px max(18px, env(safe-area-inset-right, 0px)) 12px 18px; border-top: 1px solid var(--line); display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
 .drawer .err { color: var(--bad); font-size: 13px; margin-right: auto; align-self: center; }
 .dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px 16px; }
-.dl div > span { display: block; font-size: 11.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; }
+.dl div > span:first-child { display: block; font-size: 11.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; }
 
 .toasts { position: fixed; bottom: max(16px, env(safe-area-inset-bottom, 0px)); right: max(16px, env(safe-area-inset-right, 0px)); display: flex; flex-direction: column; gap: 8px; z-index: 80; max-width: min(440px, calc(100vw - 32px)); }
 .toast { background: var(--ink); color: var(--bg); padding: 10px 14px; border-radius: 8px; box-shadow: var(--shadow); font-size: 13.5px; }
@@ -171,7 +172,7 @@ table.t { width: 100%; border-collapse: collapse; font-size: 13.5px; }
   .app { grid-template-columns: minmax(0, 1fr); }
   .rail { position: fixed; left: 0; top: 0; bottom: 0; width: 260px; z-index: 70; transform: translateX(-100%); transition: transform .2s; padding-top: max(14px, env(safe-area-inset-top, 0px)); }
   .rail.open { transform: none; box-shadow: var(--shadow); }
-  .menu-btn { display: inline-flex; }
+  .btn.menu-btn { display: inline-flex; }
   .top { padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); flex-wrap: wrap; }
   .search { order: 3; flex-basis: 100%; max-width: none; }
   .content { padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
