@@ -25,17 +25,22 @@ node --test tests/
 ## Modules
 | Area | What works |
 |---|---|
-| General ledger | Chart of accounts, manual journals with approval over $50k, segregation of duties, account drill-down, depreciation, period open/close in order with a close checklist |
-| Reports | Trial balance, income statement (period and FYTD), balance sheet, subledger-to-GL reconciliation |
-| Payables | Supplier invoices with three-way match (PO, receipt, invoice; 5% price tolerance), holds and release, purchase price variance, payments with cash check |
-| Receivables | Auto-invoicing on shipment, receipts and partial payments, aging buckets, credit limits |
-| Purchasing | Requisitions with approval over $10k, purchase orders, receiving at weighted average cost |
-| Inventory | On hand, average cost, reorder points, movement history, adjustments |
-| Order management | Sales orders with credit check and credit hold, shipping with COGS relief |
-| Workforce | Directory, org chart, departments, hire and terminate (reports move up) |
-| Absence | Requests, overlap and balance checks, manager approval |
-| Payroll | Monthly runs with withholding and employer taxes, payslips, tax remittance |
-| Platform | Approvals inbox, role-based access (6 roles), audit trail, global search, drill-down from any number to its source document and journal |
+| General ledger | Chart of accounts, manual journals with approval over $50k and segregation of duties, reversals, auto-reversing accruals, recurring journals, period open/close in order with a close checklist |
+| Reports | Trial balance, income statement (period and FYTD), balance sheet, subledger-to-GL reconciliation, sales tax liability |
+| Payables | PO invoices with three-way match (5% price tolerance) and holds, direct invoices, supplier credit memos, payments with cash check, EUR suppliers with realized FX gain/loss |
+| Receivables | Auto-invoicing on shipment with sales tax, manual invoices, credit memos with return to stock, receipts, aging, credit limits, GBP customers |
+| Cash management | Bank statements, auto and manual matching, accounting for bank-only items, reconciliation report, 13-week cash forecast |
+| Fixed assets | Asset register by category, straight-line depreciation per asset, additions with approval over $25k, disposals with gain/loss, transfers, roll-forward |
+| Budgets and forecasts | Locked budget and editable forecast by account and month, entry grid, budget vs actual with favourable/unfavourable variance, full-year outlook |
+| Purchasing | Requisitions with approval over $10k, purchase orders limited to the approved requisition, receiving at weighted average cost |
+| Inventory | On hand, average cost, reorder points, movements, adjustments, ABC cycle counting |
+| Manufacturing | Bills of material with cost roll-up, work orders with WIP accounting, labor/overhead absorption, production variance |
+| Supply planning | Net requirements from demand, supply and reorder points; creates requisitions and work orders |
+| Sales | Leads, opportunities by stage, pipeline board and weighted forecast, quotes with discount approval, quote to sales order, credit check and credit hold, shipping with COGS relief |
+| Projects | Time and materials, fixed price and internal projects, budgets, timesheets with labor cost, expense reports with policy checks and reimbursement, project billing, project P&L |
+| Workforce and payroll | Directory, org chart, hire and terminate, absence with balances, monthly payroll with taxes, payslips, tax remittance |
+| Talent | Job requisitions, candidate pipeline, offers with approval, goals and mid-year reviews, calibration, salary changes and merit planning that feed payroll |
+| Platform | One approvals inbox for every module, 6 roles, audit trail, Ctrl+K search across pages and records, sortable and paged tables, drill-down from any number to its source document and journal |
 
 ## How the pieces connect
 ```

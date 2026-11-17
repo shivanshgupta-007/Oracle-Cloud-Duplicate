@@ -32,3 +32,10 @@ Run `node --test tests/` and open index.html (or serve with `python3 -m http.ser
 - [x] UI: Enter direct invoice, AP/AR credit memo drawers, New receivables invoice, Credit memo tabs, Reverse / Make recurring in journal detail, Accrual checkbox, Journals > Recurring tab, generic approvals for extension kinds (`App.hasAct`).
 - [x] Tests: tax, memos (return to stock), reversal, accruals, recurring idempotency, FX AP/AR by hand; fuzz extended with these ops. Full suite 179/179; Playwright sweep (31 views, 80 view/tab states at 1366 and 400 px) clean, every new flow driven through the UI with reconcile ok and TB balanced.
 - State version is now 2 (`E.STATE_VERSION`); older saved browser state is reseeded.
+
+## Phase 2 status (all modules integrated)
+- [x] Platform: extension hooks, memoized ledger, generic AP/AR invoices, module loader, dynamic nav
+- [x] Modules: cash, fixed assets, projects/time/expenses, budgets, CRM, manufacturing/supply planning/cycle counts, talent, core finance (tax, memos, reversals, recurring, FX)
+- [x] Research (docs/RESEARCH.md) applied: contrast, labels, modal drawer (inert), sortable + paged tables, collapsible nav, Ctrl+K page search, action-column headers
+- [x] 179 tests green; 31 views clean at 1366px and 400px, light and dark
+- Remaining research backlog (P2/P3 in docs/RESEARCH.md): density toggle, favorites/recent in nav, tab arrow-key navigation, non-blocking font load, saved table views

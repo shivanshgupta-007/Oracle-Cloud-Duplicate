@@ -39,7 +39,7 @@
     ['People', ['workforce', 'absence', 'payroll']],
     ['Administration', ['audit', 'security']],
   ];
-  const ui = { tab: {}, filter: {} }; // per-view UI state (tabs, filters); not persisted in engine state
+  const ui = { tab: {}, filter: {}, sort: {}, limit: {} }; // per-view UI state (tabs, filters); not persisted in engine state
 
   const App = {
     E, U, esc, fmt, fmt0, fmtC, num, fdate, pill, ui, $, $$,
@@ -101,13 +101,32 @@
   /** link(kind, id, label) — opens the shared detail drawer */
   App.link = (kind, id, label) => id ? `<button type="button" class="btn link mono" data-act="open" data-kind="${esc(kind)}" data-id="${esc(id)}">${esc(label ?? id)}</button>` : '';
   /** table(cols, rows, {empty, foot}) — cols: [{h, f(row), num, cls}] */
+  // Sort value for a cell: explicit c.sort(row), else the cell's text (numbers parsed so $1,200 > $900).
+  const cellText = (html) => String(html ?? '').replace(/<[^>]*>/g, ' ').replace(/&amp;/g, '&').replace(/&[a-z#0-9]+;/gi, ' ').replace(/\s+/g, ' ').trim();
+  const sortVal = (c, r) => { if (c.sort) return c.sort(r); const t = cellText(c.f(r)); const n = t.replace(/[$,%\s]/g, '').replace(/^\((.*)\)$/, '-$1'); return /^-?\d+(\.\d+)?$/.test(n) ? +n : t.toLowerCase(); };
+  let tblSeq = 0, tblPrefix = 'v';
+  const PAGE = 100;
   App.table = function (cols, rows, opts = {}) {
     if (!rows.length) return `<div class="empty">${opts.empty || 'Nothing here yet.'}</div>`;
-    const th = cols.map((c) => `<th class="${c.num ? 'num' : ''}">${c.h}</th>`).join('');
+    const key = opts.key || `${tblPrefix}:${App.current}:${tblSeq++}`;
+    const st = ui.sort[key];
+    if (st && cols[st.col] && opts.sort !== false) {
+      const c = cols[st.col]; const dir = st.dir === 'desc' ? -1 : 1;
+      rows = rows.map((r, i) => [sortVal(c, r), i, r]).sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : a[1] - b[1]) * dir).map((x) => x[2]);
+    }
+    const limit = ui.limit[key] || PAGE; const total = rows.length; if (total > limit) rows = rows.slice(0, limit);
+    const sortable = opts.sort !== false && total > 1;
+    const th = cols.map((c, i) => { const h = c.h || '<span class="sr-only">Actions</span>'; if (!sortable || !c.h) return `<th class="${c.num ? 'num' : ''}" scope="col">${h}</th>`;
+      const on = st && st.col === i; const aria = on ? (st.dir === 'desc' ? 'descending' : 'ascending') : 'none';
+      return `<th class="${c.num ? 'num' : ''}" scope="col" aria-sort="${aria}"><button type="button" class="th-sort" data-act="sort" data-key="${esc(key)}" data-col="${i}">${h}<span class="sort-ind" aria-hidden="true">${on ? (st.dir === 'desc' ? '&darr;' : '&uarr;') : ''}</span></button></th>`; }).join('');
+    const more = total > limit ? `<div class="tbl-more"><span class="muted small">Showing ${limit} of ${total}</span> <button type="button" class="btn sm" data-act="tbl-more" data-key="${esc(key)}">Show ${Math.min(PAGE, total - limit)} more</button> <button type="button" class="btn sm" data-act="tbl-more" data-key="${esc(key)}" data-all="1">Show all</button></div>` : '';
     const tb = rows.map((r) => `<tr class="${opts.rowCls ? opts.rowCls(r) : ''}">${cols.map((c) => `<td class="${c.num ? 'num' : ''} ${c.cls || ''}">${c.f(r)}</td>`).join('')}</tr>`).join('');
     const tf = opts.foot ? `<tfoot><tr>${opts.foot.map((x, i) => `<td class="${cols[i]?.num ? 'num' : ''}">${x ?? ''}</td>`).join('')}</tr></tfoot>` : '';
-    return `<div class="tbl-wrap"><table class="t"><thead><tr>${th}</tr></thead><tbody>${tb}</tbody>${tf}</table></div>`;
+    return `<div class="tbl-wrap"><table class="t"><thead><tr>${th}</tr></thead><tbody>${tb}</tbody>${total > limit ? '' : tf}</table></div>${more}`;
   };
+  const rerender = (key) => { if (String(key).startsWith('d:') && drawerState?.opts.detail) App.open(drawerState.opts.detail.kind, drawerState.opts.detail.id); else render(); };
+  App.act('sort', (ds) => { const cur = ui.sort[ds.key]; const col = +ds.col; ui.sort[ds.key] = cur && cur.col === col ? { col, dir: cur.dir === 'asc' ? 'desc' : 'asc' } : { col, dir: 'asc' }; rerender(ds.key); });
+  App.act('tbl-more', (ds) => { ui.limit[ds.key] = ds.all ? 1e9 : (ui.limit[ds.key] || PAGE) + PAGE; rerender(ds.key); });
   /** tabs(viewName, [[key,label]]) returns html; App.tabOf(view, default) reads current */
   App.tabs = (view, list) => { const cur = App.tabOf(view, list[0][0]); return `<div class="tabs" role="tablist">${list.map(([k, l]) => `<button type="button" role="tab" aria-selected="${k === cur}" class="${k === cur ? 'on' : ''}" data-act="tab" data-view="${view}" data-tab="${k}">${l}</button>`).join('')}</div>`; };
   App.tabOf = (view, def) => ui.tab[view] || def;
@@ -125,8 +144,8 @@
    *  Read back with App.readLines(form, id) -> [{key: value}] */
   App.lines = function (id, cols, rows = [{}]) {
     const cell = (c, r, i) => c.type === 'select'
-      ? `<select class="cell-in" data-k="${c.key}" id="${id}-${c.key}-${i}">${(c.options || []).map((o) => { const [v, l] = Array.isArray(o) ? o : [o, o]; return `<option value="${esc(v)}" ${String(v) === String(r[c.key] ?? '') ? 'selected' : ''}>${esc(l)}</option>`; }).join('')}</select>`
-      : `<input class="cell-in ${c.type === 'number' ? 'num' : ''}" data-k="${c.key}" id="${id}-${c.key}-${i}" type="${c.type === 'number' ? 'number' : 'text'}" step="any" value="${esc(r[c.key] ?? '')}" ${c.readonly ? 'readonly' : ''}>`;
+      ? `<select class="cell-in" data-k="${c.key}" id="${id}-${c.key}-${i}" aria-label="${esc(c.label)}">${(c.options || []).map((o) => { const [v, l] = Array.isArray(o) ? o : [o, o]; return `<option value="${esc(v)}" ${String(v) === String(r[c.key] ?? '') ? 'selected' : ''}>${esc(l)}</option>`; }).join('')}</select>`
+      : `<input class="cell-in ${c.type === 'number' ? 'num' : ''}" data-k="${c.key}" id="${id}-${c.key}-${i}" aria-label="${esc(c.label)}" type="${c.type === 'number' ? 'number' : 'text'}" step="any" value="${esc(r[c.key] ?? '')}" ${c.readonly ? 'readonly' : ''}>`;
     const row = (r, i) => `<tr data-line="${i}">${cols.map((c) => `<td style="${c.width ? 'width:' + c.width : ''}">${cell(c, r, i)}</td>`).join('')}<td style="width:34px"><button type="button" class="btn sm" data-act="line-del" aria-label="Remove line">&times;</button></td></tr>`;
     const tpl = esc(JSON.stringify(cols));
     return `<div class="tbl-wrap"><table class="t lines-tbl" id="${id}" data-cols="${tpl}"><thead><tr>${cols.map((c) => `<th class="${c.type === 'number' ? 'num' : ''}">${c.label}</th>`).join('')}<th></th></tr></thead><tbody>${rows.map(row).join('')}</tbody></table></div>
@@ -150,7 +169,7 @@
     const d = document.createElement('form'); d.className = 'drawer'; d.id = 'drawer'; d.setAttribute('role', 'dialog'); d.setAttribute('aria-modal', 'true'); d.setAttribute('aria-label', title); d.noValidate = true;
     d.innerHTML = `<header><h2>${esc(title)}</h2><button type="button" class="btn sm" data-act="close-drawer">Close</button></header>
       <div class="body">${typeof html === 'function' ? html() : html}</div>
-      <footer><span class="err" id="drawerErr"></span>${opts.extraButtons || ''}${opts.onSubmit ? `<button type="button" class="btn" data-act="close-drawer">Cancel</button><button type="submit" class="btn primary">${esc(opts.submitLabel || 'Save')}</button>` : ''}</footer>`;
+      <footer><span class="err" id="drawerErr" role="alert"></span>${opts.extraButtons || ''}${opts.onSubmit ? `<button type="button" class="btn" data-act="close-drawer">Cancel</button><button type="submit" class="btn primary">${esc(opts.submitLabel || 'Save')}</button>` : ''}</footer>`;
     d.addEventListener('submit', (ev) => {
       ev.preventDefault();
       const snap = JSON.stringify(E.S);
@@ -158,11 +177,11 @@
       catch (err) { E.load(JSON.parse(snap)); $('#drawerErr', d).textContent = err.message || String(err); }
     });
     if (opts.oninput) { d.addEventListener('input', () => opts.oninput(d)); d.addEventListener('change', () => opts.oninput(d)); }
-    document.body.append(scrim, d);
+    document.body.append(scrim, d); const appEl = $('.app'); if (appEl) appEl.inert = true;
     if (opts.oninput) opts.oninput(d);
     const first = d.querySelector('.body input, .body select, .body textarea, .body button'); (first || d.querySelector('header button')).focus();
   };
-  function closeDrawer() { $('#drawer')?.remove(); $('#scrim')?.remove(); const r = drawerState?.ret; drawerState = null; if (r && document.contains(r)) r.focus(); }
+  function closeDrawer() { $('#drawer')?.remove(); $('#scrim')?.remove(); const appEl = $('.app'); if (appEl) appEl.inert = false; const r = drawerState?.ret; drawerState = null; if (r && document.contains(r)) r.focus(); }
   function refreshDrawer() { if (drawerState && drawerState.opts.detail) App.open(drawerState.opts.detail.kind, drawerState.opts.detail.id); }
   App.closeDrawer = closeDrawer;
   App.act('close-drawer', closeDrawer);
@@ -174,7 +193,9 @@
   App.detail = (kind, fn) => (details[kind] = fn);
   App.open = function (kind, id) {
     const fn = details[kind]; if (!fn) { toast(`No detail view for ${kind}.`, 'bad'); return; }
-    const r = fn(id); if (!r) { toast(`${id} was not found.`, 'bad'); return; }
+    const prevPrefix = tblPrefix, prevSeq = tblSeq; tblPrefix = `d:${kind}:${id}`; tblSeq = 0;
+    let r; try { r = fn(id); } finally { tblPrefix = prevPrefix; tblSeq = prevSeq; }
+    if (!r) { toast(`${id} was not found.`, 'bad'); return; }
     App.drawer(r.title, r.html, { detail: { kind, id }, extraButtons: r.buttons || '' });
   };
   App.act('open', (ds) => App.open(ds.kind, ds.id));
@@ -446,10 +467,14 @@
     for (const v in navCountFns) { try { out[v] = navCountFns[v](); } catch (e) { /* ignore */ } }
     return out;
   }
+  let navCollapsed = {}; try { navCollapsed = JSON.parse(localStorage.getItem('ledgerline-nav') || '{}') || {}; } catch (e) { navCollapsed = {}; }
+  App.act('nav-toggle', (ds) => { navCollapsed[ds.group] = !navCollapsed[ds.group]; try { localStorage.setItem('ledgerline-nav', JSON.stringify(navCollapsed)); } catch (e) { /* ignore */ } renderNav(); });
   function renderNav() {
     const counts = navCounts();
     $('#rail').innerHTML = `<div class="brand"><div class="brand-mark"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M4 19h16M4 14h10M4 9h16M4 4h7"/></svg></div><div><b>Ledgerline</b><span>${esc(E.S.company)}</span></div></div>`
-      + NAV.map(([g, names]) => { const items = names.filter((n) => views[n]); if (!items.length) return ''; return `<div class="nav-group"><h4>${g}</h4><div class="nav">${items.map((n) => `<a href="#${n}" class="${App.current === n ? 'on' : ''}" ${App.current === n ? 'aria-current="page"' : ''}><span>${esc(views[n].title)}</span>${counts[n] ? `<span class="count">${counts[n]}</span>` : ''}</a>`).join('')}</div></div>`; }).join('');
+      + NAV.map(([g, names]) => { const items = names.filter((n) => views[n]); if (!items.length) return '';
+        const open = !navCollapsed[g] || items.includes(App.current); const badge = items.reduce((a, n) => a + (+counts[n] || 0), 0);
+        return `<div class="nav-group"><h4><button type="button" class="nav-toggle" data-act="nav-toggle" data-group="${esc(g)}" aria-expanded="${open}"><span>${g}</span>${!open && badge ? `<span class="count">${badge}</span>` : ''}<span class="chev" aria-hidden="true">${open ? '&#8722;' : '+'}</span></button></h4><div class="nav" ${open ? '' : 'hidden'}>${items.map((n) => `<a href="#${n}" class="${App.current === n ? 'on' : ''}" ${App.current === n ? 'aria-current="page"' : ''}><span>${esc(views[n].title)}</span>${counts[n] ? `<span class="count">${counts[n]}</span>` : ''}</a>`).join('')}</div></div>`; }).join('');
   }
   function render() {
     const v = views[App.current] || views.home;
@@ -457,6 +482,7 @@
     $('#todayChip').textContent = `Today ${fdate(E.S.today)} · Open: ${App.openPeriods().map(U.periodLabel).join(', ') || 'none'}`;
     const sel = $('#roleSel'); if (sel.value !== E.S.role) sel.value = E.S.role;
     const scroll = window.scrollY;
+    tblSeq = 0; tblPrefix = 'v';
     try { $('#content').innerHTML = v.render(); v.after && v.after($('#content')); }
     catch (err) { console.error(err); $('#content').innerHTML = `<div class="callout bad">This page failed to render: ${esc(err.message)}</div>`; }
     window.scrollTo(0, scroll);
@@ -484,13 +510,14 @@
 
   function setupSearch() {
     const inp = $('#globalSearch'), box = $('#searchResults');
-    const draw = () => { const res = E.search(inp.value); if (!inp.value.trim()) { box.hidden = true; return; }
+    const draw = () => { const q = inp.value.trim().toLowerCase(); const pages = q.length >= 2 ? order.filter((n) => views[n].title.toLowerCase().includes(q)).slice(0, 6).map((n) => ({ kind: 'view', id: n, label: views[n].title, sub: 'Go to page' })) : []; const res = [...pages, ...E.search(inp.value)]; if (!inp.value.trim()) { box.hidden = true; return; }
       box.innerHTML = res.length ? res.map((r) => `<button type="button" data-act="search-pick" data-kind="${r.kind}" data-id="${esc(r.id)}">${esc(r.label)}<small>${esc(r.sub)}</small></button>`).join('') : '<div class="empty">No matches.</div>'; box.hidden = false; };
     inp.addEventListener('input', draw); inp.addEventListener('focus', draw);
     inp.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { const b = box.querySelector('button'); if (b) b.click(); } if (ev.key === 'ArrowDown') { ev.preventDefault(); box.querySelector('button')?.focus(); } });
     document.addEventListener('click', (ev) => { if (!ev.target.closest('.search')) box.hidden = true; });
   }
-  App.act('search-pick', (ds) => { $('#searchResults').hidden = true; $('#globalSearch').value = ''; App.open(ds.kind, ds.id); });
+  App.act('search-pick', (ds) => { $('#searchResults').hidden = true; $('#globalSearch').value = ''; if (ds.kind === 'view') App.go(ds.id); else App.open(ds.kind, ds.id); });
+  document.addEventListener('keydown', (ev) => { if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'k') { ev.preventDefault(); if ($('#drawer')) closeDrawer(); $('#globalSearch').focus(); $('#globalSearch').select(); } });
 
   App.start = function () {
     loadOrSeed();
