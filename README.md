@@ -9,17 +9,21 @@ to their GL control accounts.
 It is not a copy of any vendor's product: the name, design and code are original.
 
 ## Run it
-No build step and no dependencies.
-
+**Single user, no install** (data stays in your browser):
 ```bash
 python3 -m http.server 8000
 ```
-Then open http://localhost:8000. A hosted copy (private to the owner) is at https://claude.ai/artifact/Qhi6dYcipUkiKJZKoeHHsV. You can also open `index.html` directly. Data lives in your browser's
-localStorage; **Reset demo** in the top bar restores the sample company.
+Then open http://localhost:8000. A hosted copy (private to the owner) is at https://claude.ai/artifact/Qhi6dYcipUkiKJZKoeHHsV.
 
-Tests (Node 18+):
+**Multi-user server** (Node 18+, no dependencies; data saved on the server):
 ```bash
-node --test tests/
+npm start
+```
+Open http://127.0.0.1:8080 and sign in as `admin`, `controller`, `ap`, `buyer`, `orders` or `hr` (password: the username followed by `-demo`). See [server/README.md](server/README.md).
+
+Tests:
+```bash
+npm test
 ```
 
 ## Modules
@@ -40,6 +44,10 @@ node --test tests/
 | Projects | Time and materials, fixed price and internal projects, budgets, timesheets with labor cost, expense reports with policy checks and reimbursement, project billing, project P&L |
 | Workforce and payroll | Directory, org chart, hire and terminate, absence with balances, monthly payroll with taxes, payslips, tax remittance |
 | Talent | Job requisitions, candidate pipeline, offers with approval, goals and mid-year reviews, calibration, salary changes and merit planning that feed payroll |
+| Entities and departments | Two legal entities with per-entity balancing, intercompany charges and settlement, consolidated statements with eliminations, department P&L, department budgets with a budget warning on requisitions |
+| Revenue and year end | Service contracts, deferred revenue recognized monthly, allocation by standalone selling price, revenue waterfall, cancellations, year-end close to retained earnings per entity |
+| Warehouses | Three locations, transfers with in-transit stock, serial and lot tracking with expiry, trace from purchase to customer |
+| Reporting and data | Report builder over every module's data with filters, grouping and totals, saved reports, CSV export, validated all-or-nothing CSV import |
 | Platform | One approvals inbox for every module, 6 roles, audit trail, Ctrl+K search across pages and records, sortable and paged tables, drill-down from any number to its source document and journal |
 
 ## How the pieces connect
