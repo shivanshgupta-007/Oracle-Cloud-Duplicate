@@ -134,3 +134,52 @@ describe('grid edit validation', () => {
     assert.ok(E.reconcile().every((r) => r.ok)); const tb = E.trialBalance(); assert.ok(near(tb.dr, tb.cr));
   });
 });
+
+describe('department budgets and budgetary control', () => {
+  test('department layer splits the company opex budget exactly', () => {
+    for (const v of E.PLAN_VERSIONS) for (const a of E.deptPlanAccounts()) for (const p of ['2026-07', '2026-11', '2027-06']) {
+      const split = E.planDepts().reduce((x, d) => x + E.deptBudgetAmount(v, d, a.code, p), 0);
+      assert.ok(near(split, E.budgetAmount(v, a.code, p)), `${v} ${a.code} ${p}`);
+    }
+    // wages follow salary share: Engineering (high salaries) gets more 6000 than People
+    assert.ok(E.deptBudgetAmount(E.PLAN_BUDGET, 'Engineering', '6000', '2026-09') > E.deptBudgetAmount(E.PLAN_BUDGET, 'People', '6000', '2026-09'));
+    assert.ok(E.deptBudgetAmount(E.PLAN_BUDGET, 'Operations', E.PLAN_PURCHASES, '2026-11') > 0);
+  });
+  test('budget vs actual filtered by department', () => {
+    const all = E.budgetVsActual('2026-10'), eng = E.budgetVsActual('2026-10', E.PLAN_BUDGET, { dept: 'Engineering' });
+    assert.equal(eng.dept, 'Engineering');
+    const w = eng.rows.find((r) => r.code === '6000');
+    assert.ok(near(w.period.actual, E.natural('6000', E.balance('6000', { fromPeriod: '2026-10', toPeriod: '2026-10', dept: 'Engineering' }))));
+    assert.ok(near(w.period.budget, E.deptBudgetAmount(E.PLAN_BUDGET, 'Engineering', '6000', '2026-10')));
+    assert.ok(w.period.actual > 0 && w.period.actual < all.rows.find((r) => r.code === '6000').period.actual);
+    // department rows sum (incl. Unassigned) to the company opex actual
+    const sumDepts = E.deptBudgetSummary('2026-10').reduce((a, x) => a + x.period.actual, 0);
+    const opex = E.deptPlanAccounts().reduce((a, x) => a + E.planActual(x.code, '2026-10'), 0);
+    assert.ok(near(sumDepts, opex, 0.05));
+    assert.throws(() => E.budgetVsActual('2026-10', E.PLAN_BUDGET, { dept: 'Nope' }), /does not exist/);
+  });
+  test('requisition over the department purchasing budget gets an advisory warning, shown in approvals', () => {
+    const big = E.S.reqs.find((r) => r.status === 'Pending Approval');
+    assert.match(big.budgetWarning || '', /Operations purchasing budget for Nov-26/);
+    const it = E.approvalsInbox().find((x) => x.kind === 'req' && x.id === big.id); assert.match(it.why, /Budget check/);
+    // a small request in a month with headroom is clean; an over-budget one is not blocked
+    const ops = E.S.employees.find((e) => e.dept === 'Operations' && e.status === 'Active');
+    const p = '2026-12';
+    const head = E.purchaseBudgetStatus('Operations', p);
+    const ok = E.createReq({ date: '2026-12-02', requester: ops.name, lines: [{ sku: 'CB-010', qty: 10, price: 6.5 }] });
+    assert.equal(ok.budgetWarning, undefined);
+    const over = E.createReq({ date: '2026-12-03', requester: ops.name, lines: [{ sku: 'HX-310', qty: Math.ceil(head.budget / 300) + 5, price: 310 }] });
+    assert.match(over.budgetWarning, /exceeds the remaining/); assert.equal(over.status, 'Pending Approval');
+    assert.ok(E.purchaseBudgetStatus('Operations', p).remaining < 0);
+    // a department with no purchasing budget is flagged too
+    const eng = E.S.employees.find((e) => e.dept === 'Engineering' && e.status === 'Active');
+    assert.match(E.createReq({ date: '2026-12-04', requester: eng.name, lines: [{ sku: 'CB-010', qty: 1, price: 6.5 }] }).budgetWarning, /no purchasing budget/);
+    // unknown requester: no check, no warning
+    assert.equal(E.createReq({ date: '2026-12-04', requester: 'Visitor', lines: [{ sku: 'CB-010', qty: 1, price: 6.5 }] }).budgetWarning, undefined);
+  });
+  test('department cell edits respect the lock', () => {
+    assert.throws(() => E.setDeptBudgetCell(E.PLAN_BUDGET, 'Sales', '6500', '2027-01', 10), /locked/);
+    assert.equal(E.setDeptBudgetCell(E.PLAN_FORECAST, 'Sales', '6500', '2027-01', '1,200'), 1200);
+    assert.throws(() => E.setDeptBudgetCell(E.PLAN_FORECAST, 'Nope', '6500', '2027-01', 1), /does not exist/);
+  });
+});

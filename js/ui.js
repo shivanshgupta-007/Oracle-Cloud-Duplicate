@@ -398,9 +398,10 @@
   // ---------- shared transaction forms (used from details, approvals and module pages) ----------
   const today = () => E.S.today;
   App.act('po-receive', (ds) => { const p = E.po(ds.id);
-    App.drawer(`Receive goods on ${p.id}`, App.field('Receipt date', App.input('rcvDate', today(), 'date')) + App.table([{ h: 'Item', f: (l) => esc(l.sku) }, { h: 'Ordered', num: true, f: (l) => num(l.qty) }, { h: 'Already received', num: true, f: (l) => num(l.received) }, { h: 'Receive now', num: true, f: (l) => `<input class="cell-in num" style="max-width:110px" type="number" min="0" step="1" data-rcv="${p.lines.indexOf(l)}" id="rcv-${p.lines.indexOf(l)}" value="${l.qty - l.received}">` }], p.lines)
+    const locs = (E.S.locations || []).filter((l) => l.active !== false);
+    App.drawer(`Receive goods on ${p.id}`, App.field('Receipt date', App.input('rcvDate', today(), 'date')) + (locs.length ? App.field('Receive into', App.select('rcvLoc', locs.map((l) => [l.code, `${l.code} ${l.name}`]), locs[0].code)) : '') + App.table([{ h: 'Item', f: (l) => esc(l.sku) }, { h: 'Ordered', num: true, f: (l) => num(l.qty) }, { h: 'Already received', num: true, f: (l) => num(l.received) }, { h: 'Receive now', num: true, f: (l) => `<input class="cell-in num" style="max-width:110px" type="number" min="0" step="1" data-rcv="${p.lines.indexOf(l)}" id="rcv-${p.lines.indexOf(l)}" value="${l.qty - l.received}">` }], p.lines)
       + '<div class="callout">Receiving posts Dr 1200 Inventory and Cr 2100 Received not invoiced at the PO price, and updates each item\'s weighted average cost.</div>',
-      { submitLabel: 'Post receipt', onSubmit: (f) => E.receivePO(p.id, App.val(f, 'rcvDate'), App.$$('[data-rcv]', f).map((x) => +x.value || 0)), success: `Goods received on ${p.id}.` });
+      { submitLabel: 'Post receipt', onSubmit: (f) => { const q = App.$$('[data-rcv]', f).map((x) => +x.value || 0); return locs.length ? E.receivePO(p.id, App.val(f, 'rcvDate'), q, { location: App.val(f, 'rcvLoc') }) : E.receivePO(p.id, App.val(f, 'rcvDate'), q); }, success: `Goods received on ${p.id}.` });
   });
   App.act('ap-enter', (ds) => {
     const billable = E.S.pos.filter((p) => p.lines.some((l) => l.received > l.invoiced));

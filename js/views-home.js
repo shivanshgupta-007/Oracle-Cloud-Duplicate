@@ -201,9 +201,9 @@
       const recon = `<section class="card"><div class="card-h"><span>Subledger reconciliation</span>${rec.every((r) => r.ok) ? pill('All tie out', 'good') : pill('Differences', 'bad')}</div>
         ${App.table([
           { h: 'Control account', f: (r) => `${App.link('acct', r.acct)} ${esc(r.name)}` },
-          { h: 'Subledger', num: true, f: (r) => fmt(r.sub) },
-          { h: 'GL', num: true, f: (r) => fmt(r.gl) },
-          { h: 'Difference', num: true, f: (r) => r.ok ? '<span class="muted">0.00</span>' : `<span style="color:var(--bad)">${fmt(r.diff)}</span>` },
+          { h: 'Subledger', num: true, f: (r) => (r.units ? App.num(r.sub) + ' units' : fmt(r.sub)) },
+          { h: 'GL', num: true, f: (r) => (r.units ? App.num(r.gl) + ' units' : fmt(r.gl)) },
+          { h: 'Difference', num: true, f: (r) => r.ok ? `<span class="muted">${r.units ? '0' : '0.00'}</span>` : `<span style="color:var(--bad)">${r.units ? App.num(r.diff) : fmt(r.diff)}</span>` },
         ], rec)}</section>`;
 
       // (e) recent activity

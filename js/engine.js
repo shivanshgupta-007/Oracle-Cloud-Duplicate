@@ -270,6 +270,7 @@
   function recurringFromJournal(jeId, { name, startPeriod, day } = {}) {
     const j = need(je(jeId), 'Journal'); if (j.status !== 'Posted') fail(`${jeId} is ${j.status}. Only posted journals can be made recurring.`);
     if (j.reversalOf) fail('A reversal cannot be made recurring.');
+    { const ctrl = controlAccounts(); const hit = j.lines.find((l) => ctrl.has(l.acct)); if (hit) fail(`${jeId} posts to control account ${hit.acct} ${acct(hit.acct)?.name || ''}, which a subledger reconciles. Recurring journals cannot post there.`); }
     const sp = startPeriod || nextPeriod(j.period) || fail('There is no later period to start from.');
     return createRecurring({ name: name || j.desc, desc: j.desc, lines: j.lines, startPeriod: sp, day: day || +j.date.slice(8), source: 'Recurring', generated: sp <= j.period ? { [j.period]: j.id } : {} });
   }

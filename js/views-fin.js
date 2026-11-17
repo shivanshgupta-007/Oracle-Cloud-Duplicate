@@ -417,9 +417,9 @@
     const ok = rows.every((r) => r.ok);
     const tbl = App.table([
       { h: 'Control account', f: (r) => `${App.link('acct', r.acct)} ${esc(r.name)}` },
-      { h: 'Subledger total', num: true, f: (r) => fmt(r.sub) },
-      { h: 'GL balance', num: true, f: (r) => fmt(r.gl) },
-      { h: 'Difference', num: true, f: (r) => fmt(r.diff) },
+      { h: 'Subledger total', num: true, f: (r) => (r.units ? App.num(r.sub) + ' units' : fmt(r.sub)) },
+      { h: 'GL balance', num: true, f: (r) => (r.units ? App.num(r.gl) + ' units' : fmt(r.gl)) },
+      { h: 'Difference', num: true, f: (r) => (r.units ? App.num(r.diff) : fmt(r.diff)) },
       { h: 'Status', f: (r) => (r.ok ? pill('Reconciled', 'good') : pill('Difference', 'bad')) },
     ], rows);
     return `<div class="callout ${ok ? 'good' : 'bad'}" style="margin-bottom:14px">${ok ? 'All control accounts tie out to their subledgers, and intercompany balances agree between entities.' : 'At least one control account does not agree with its subledger. Open the account to review postings.'} Reconciliation uses current balances across all periods.</div>`
