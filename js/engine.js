@@ -43,6 +43,12 @@
   const ROLE_USERS = { 'Administrator': 'System Administrator', 'Controller': 'Avery Lin', 'AP Specialist': 'Sam Achebe', 'Buyer': 'Dana Whitfield', 'Order Manager': 'Ines Duarte', 'HR Specialist': 'Nadia Petrova' };
   const can = (role, perm) => { const p = ROLES[role] || []; return p.includes('*') || p.includes(perm) || COMMON.includes(perm); };
 
+  // ---------- extension points (see PLAN.md "Extending the engine") ----------
+  const hooks = { state: [], reconcile: [], approvals: [], checklist: [], search: [], seedSetup: [], seedMonthly: [], seedFinal: [] };
+  /** Register a hook: on('reconcile', fn). State hooks MUST be idempotent (only fill missing keys). */
+  const on = (name, fn) => { if (!hooks[name]) throw new Error('Unknown hook ' + name); hooks[name].push(fn); };
+  const addPerms = (role, perms) => { ROLES[role] = Array.from(new Set([...(ROLES[role] || []), ...perms])); };
+
   // ---------- state ----------
   let S;
   function blankState() {
@@ -58,8 +64,15 @@
       audit: [],
     };
   }
-  function reset() { S = blankState(); Engine.S = S; return S; }
-  function load(obj) { S = obj; Engine.S = S; return S; }
+  function applyStateHooks(st) { hooks.state.forEach((f) => f(st)); return st; }
+  function reset() { S = applyStateHooks(blankState()); Engine.S = S; return S; }
+  function load(obj) { S = applyStateHooks(obj); Engine.S = S; return S; }
+  /** Bump the ledger revision. Call after ANY change to a journal's lines or status. */
+  const touch = () => { S._rev = (S._rev || 0) + 1; };
+  /** Add a GL account if missing (no audit entry). For extension setup/state hooks. */
+  function ensureAccount(code, name, type) {
+    if (!S.accounts.some((a) => a.code === code)) { S.accounts.push({ code, name, type, active: true }); S.accounts.sort((a, b) => a.code.localeCompare(b.code)); touch(); }
+  }
 
   const nextId = (prefix) => { S.seq[prefix] = (S.seq[prefix] || 1000) + 1; return `${prefix}-${S.seq[prefix]}`; };
   const log = (action, ref, detail) => { S.audit.unshift({ ts: S._clock || new Date().toISOString(), date: S._date || TODAY, user: S.user, role: S.role, action, ref: ref || '', detail: detail || '' }); if (S.audit.length > 2000) S.audit.length = 2000; };
@@ -89,7 +102,7 @@
     if (!name) fail('Account name is required.');
     if (!(type in DEBIT_NORMAL)) fail('Choose an account type.');
     S.accounts.push({ code, name, type, active: true });
-    S.accounts.sort((a, b) => a.code.localeCompare(b.code));
+    S.accounts.sort((a, b) => a.code.localeCompare(b.code)); touch();
     log('Created account', code, name);
     return acct(code);
   }
@@ -117,7 +130,7 @@
     if (Math.abs(dr - cr) > 0.004) fail(`Journal is out of balance by ${money(r2(dr - cr))}. Debits must equal credits.`);
     const p = assertOpen(date);
     const j = { id: nextId('JE'), date, period: p, source, desc, lines, ref, total: dr, status: needsApproval ? 'Pending Approval' : 'Posted', createdBy: S.user, role: S.role };
-    S.journals.push(j);
+    S.journals.push(j); touch();
     log(needsApproval ? 'Submitted journal for approval' : 'Posted journal', j.id, `${source}: ${desc} (${money(dr)})`);
     return j;
   }
@@ -130,15 +143,24 @@
   function approveJournal(id) {
     const j = need(je(id), 'Journal'); if (j.status !== 'Pending Approval') fail(`${id} is not awaiting approval.`);
     assertOpen(j.date); if (j.createdBy === S.user && S.role !== 'Administrator') fail('You cannot approve a journal you created (segregation of duties).');
-    j.status = 'Posted'; j.approvedBy = S.user; log('Approved journal', id); return j;
+    j.status = 'Posted'; j.approvedBy = S.user; touch(); log('Approved journal', id); return j;
   }
   function rejectJournal(id, reason) {
     const j = need(je(id), 'Journal'); if (j.status !== 'Pending Approval') fail(`${id} is not awaiting approval.`);
-    j.status = 'Rejected'; j.rejectReason = reason || ''; log('Rejected journal', id, reason); return j;
+    j.status = 'Rejected'; j.rejectReason = reason || ''; touch(); log('Rejected journal', id, reason); return j;
   }
 
   /** Sum of (dr - cr) for posted journals, optionally limited to a period range. */
-  function balances({ fromPeriod, toPeriod } = {}) {
+  // Memoized per (state object, ledger revision, period range): reports and dashboards call this many times per render.
+  let balCache = { S: null, rev: -1, m: new Map() };
+  function balances(opts = {}) {
+    if (balCache.S !== S || balCache.rev !== (S._rev || 0)) balCache = { S, rev: S._rev || 0, m: new Map() };
+    const key = (opts.fromPeriod || '') + '|' + (opts.toPeriod || '');
+    let hit = balCache.m.get(key);
+    if (!hit) { hit = computeBalances(opts); balCache.m.set(key, hit); }
+    return { ...hit };
+  }
+  function computeBalances({ fromPeriod, toPeriod } = {}) {
     const out = {}; S.accounts.forEach((a) => (out[a.code] = 0));
     for (const j of S.journals) {
       if (j.status !== 'Posted') continue;
@@ -381,6 +403,33 @@
     return out;
   }
 
+  /** Non-PO supplier invoice (services, utilities, expenses):
+   *  createAPInvoice({supplierId, number, date, lines:[{acct, desc, amount, project?}], source, ref}) -> Validated invoice. */
+  function createAPInvoice({ supplierId, number, date, lines, source = 'Payables', ref = '' }) {
+    const s = need(sup(supplierId), 'Supplier'); assertOpen(date);
+    number = String(number || '').trim(); if (!number) fail("Enter the supplier's invoice number.");
+    if (S.apInvoices.some((i) => i.supplierId === s.id && i.number === number && i.status !== 'Cancelled')) fail(`Invoice ${number} from this supplier is already entered (duplicate check).`);
+    lines = (lines || []).filter((l) => +l.amount).map((l) => ({ acct: String(l.acct), desc: l.desc || '', amount: r2(+l.amount), project: l.project || '' }));
+    if (!lines.length) fail('Add at least one line with an amount.');
+    lines.forEach((l) => { if (!acct(l.acct)) fail(`Account ${l.acct} does not exist.`); if (!Number.isFinite(l.amount)) fail('Amounts must be valid numbers.'); });
+    const total = sum(lines, (l) => l.amount); if (!(total > 0)) fail('The invoice total must be greater than zero.');
+    const inv = { id: nextId('APINV'), number, supplierId: s.id, poId: '', date, due: addDays(date, s.terms), lines, total, paid: 0, holds: [], status: 'Validated', ref };
+    const j = createJournal({ date, source, desc: `Invoice ${number} (${s.name})`, ref: inv.id, lines: [...lines.map((l) => (l.amount > 0 ? { acct: l.acct, dr: l.amount, memo: l.desc } : { acct: l.acct, cr: -l.amount, memo: l.desc })), { acct: '2000', cr: total, memo: s.name }] });
+    inv.journal = j.id; S.apInvoices.push(inv); log('Entered invoice', inv.id, `${s.name} ${money(total)}`); return inv;
+  }
+  /** Receivables invoice not created by shipping (services, projects, fees):
+   *  createARInvoice({customerId, date, lines:[{acct, desc, amount}], source, ref}) -> Open invoice. */
+  function createARInvoice({ customerId, date, lines, source = 'Receivables', ref = '' }) {
+    const c = need(cust(customerId), 'Customer'); assertOpen(date);
+    lines = (lines || []).filter((l) => +l.amount).map((l) => ({ acct: String(l.acct), desc: l.desc || '', amount: r2(+l.amount) }));
+    if (!lines.length) fail('Add at least one line with an amount.');
+    lines.forEach((l) => { if (!acct(l.acct)) fail(`Account ${l.acct} does not exist.`); if (!Number.isFinite(l.amount)) fail('Amounts must be valid numbers.'); });
+    const total = sum(lines, (l) => l.amount); if (!(total > 0)) fail('The invoice total must be greater than zero.');
+    const inv = { id: nextId('ARINV'), customerId: c.id, soId: '', date, due: addDays(date, c.terms), total, paid: 0, status: 'Open', lines, ref };
+    const j = createJournal({ date, source, desc: `Invoice ${inv.id} (${c.name})${ref ? ' for ' + ref : ''}`, ref: inv.id, lines: [{ acct: '1100', dr: total }, ...lines.map((l) => (l.amount > 0 ? { acct: l.acct, cr: l.amount, memo: l.desc } : { acct: l.acct, dr: -l.amount, memo: l.desc }))] });
+    inv.journal = j.id; S.arInvoices.push(inv); log('Raised invoice', inv.id, `${c.name} ${money(total)}`); return inv;
+  }
+
   // ---------- order to cash ----------
   const openAR = (custId) => sum(S.arInvoices.filter((i) => i.customerId === custId && i.status !== 'Paid'), (i) => i.total - i.paid);
   const openOrders = (custId) => sum(S.sos.filter((o) => o.customerId === custId && (o.status === 'Booked')), (o) => o.total);
@@ -501,6 +550,7 @@
     S.apInvoices.filter((i) => i.status === 'On Hold').forEach((i) => out.push({ kind: 'apinv', id: i.id, title: `Invoice ${i.number} from ${sup(i.supplierId).name}, ${money(i.total)}`, who: 'Payables', date: i.date, perm: 'ap.release', why: i.holds.join('; ') }));
     S.sos.filter((o) => o.status === 'Credit Hold').forEach((o) => out.push({ kind: 'so', id: o.id, title: `Order ${money(o.total)} for ${cust(o.customerId).name}`, who: 'Order management', date: o.date, perm: 'so.release', why: o.hold }));
     S.absences.filter((a) => a.status === 'Pending').forEach((a) => out.push({ kind: 'abs', id: a.id, title: `${a.type}, ${a.days} day(s): ${emp(a.empId).name}`, who: emp(a.empId).name, date: a.start, perm: 'hr.absence.approve', why: `${a.start} to ${a.end}` }));
+    hooks.approvals.forEach((f) => out.push(...f()));
     return out.sort((a, b) => a.date.localeCompare(b.date));
   }
   function closeChecklist(p) {
@@ -515,6 +565,7 @@
       { task: 'Invoice holds resolved', done: !holds, detail: holds ? `${holds} on hold` : 'No holds' },
       { task: 'Open receipts reviewed', done: !unreceived, detail: unreceived ? `${unreceived} PO(s) not fully received` : 'All received', advisory: true },
       { task: 'Subledgers reconcile to GL', done: rec, detail: rec ? 'AP, AR, inventory, accrual tie out' : 'Differences found' },
+      ...hooks.checklist.flatMap((f) => f(p)),
       { task: 'Period closed', done: S.periods[p] === 'Closed', detail: S.periods[p] },
     ];
   }
@@ -527,6 +578,7 @@
       { name: 'Inventory', acct: '1200', sub: sum(S.items, (i) => i.onHand * i.avgCost), gl: b['1200'] },
       { name: 'Received not invoiced', acct: '2100', sub: sum(S.pos.flatMap((p) => p.lines), (l) => (l.received - l.invoiced) * l.price), gl: -b['2100'] },
     ];
+    hooks.reconcile.forEach((f) => rows.push(...f(b)));
     return rows.map((r) => ({ ...r, diff: r2(r.sub - r.gl), ok: Math.abs(r.sub - r.gl) < 0.05 }));
   }
   function search(q) {
@@ -544,7 +596,8 @@
     S.apInvoices.forEach((i) => hit(i.id, i.number) && out.push({ kind: 'apinv', id: i.id, label: `${i.id} (${i.number})`, sub: `${sup(i.supplierId).name}, ${i.status}` }));
     S.arInvoices.forEach((i) => hit(i.id) && out.push({ kind: 'arinv', id: i.id, label: i.id, sub: `${cust(i.customerId).name}, ${i.status}` }));
     S.reqs.forEach((r) => hit(r.id, r.requester) && out.push({ kind: 'req', id: r.id, label: r.id, sub: `${r.requester}, ${r.status}` }));
-    return out.slice(0, 25);
+    hooks.search.forEach((f) => out.push(...f(q, hit)));
+    return out.slice(0, 30);
   }
 
   const Engine = {
@@ -561,6 +614,10 @@
     createSO, releaseCreditHold, cancelSO, shipSO, applyReceipt, openAR, arAging,
     hireEmployee, terminateEmployee, requestAbsence, approveAbsence, rejectAbsence, runPayroll,
     approvalsInbox, closeChecklist, reconcile, search,
+    createAPInvoice, createARInvoice,
+    hooks, on, addPerms, touch, ensureAccount, need, fail,
+    /** Add or replace engine functions from an extension module. */
+    extend(obj) { Object.keys(obj).forEach((k) => { Engine[k] = obj[k]; }); return Engine; },
   };
   // getter/setter on S don't survive object literal spread; define explicitly
   Object.defineProperty(Engine, 'S', { get: () => S, set: (v) => { S = v; }, enumerable: true });

@@ -25,11 +25,15 @@
   const pill = (status, tone) => `<span class="pill ${tone ?? STATUS_TONE[status] ?? ''}">${esc(status)}</span>`;
 
   // ---------- registry ----------
-  const views = {}; const order = []; const acts = {};
+  const views = {}; const order = []; const acts = {}; const refKinds = []; const navCountFns = {};
+  // Nav order. Views not listed here are appended to the group named in their def.group.
   const NAV = [
     ['Overview', ['home', 'approvals']],
     ['Financials', ['journals', 'accounts', 'reports', 'periods', 'payables', 'receivables']],
-    ['Supply chain', ['purchasing', 'inventory', 'orders']],
+    ['Procurement', ['purchasing']],
+    ['Supply chain', ['inventory']],
+    ['Sales', ['orders']],
+    ['Projects', []],
     ['People', ['workforce', 'absence', 'payroll']],
     ['Administration', ['audit', 'security']],
   ];
@@ -37,7 +41,14 @@
 
   const App = {
     E, U, esc, fmt, fmt0, num, fdate, pill, ui, $, $$,
-    view(name, def) { views[name] = def; order.push(name); },
+    view(name, def) {
+      views[name] = def; order.push(name);
+      if (!NAV.some(([, names]) => names.includes(name))) { const g = def.group || 'Administration'; let grp = NAV.find(([n]) => n === g); if (!grp) { grp = [g, []]; NAV.splice(NAV.length - 1, 0, grp); } grp[1].push(name); }
+    },
+    /** refKind('BANK-', 'bankstmt') teaches App.refLink to link an ID prefix to a detail kind. */
+    refKind(prefix, kind) { refKinds.push([prefix, kind]); },
+    /** Extra nav badge counts: App.navCount('assets', () => n). */
+    navCount(view, fn) { navCountFns[view] = fn; },
     act(name, fn) { acts[name] = fn; },
     get role() { return E.S.role; },
     can(perm) { return E.can(E.S.role, perm); },
@@ -173,6 +184,7 @@
   App.journalLines = journalLines;
   const refLink = (ref) => {
     if (!ref) return '<span class="muted">None</span>';
+    const ext = refKinds.find(([p]) => ref.startsWith(p)); if (ext) return App.link(ext[1], ref);
     const k = ref.startsWith('PO-') ? 'po' : ref.startsWith('SO-') ? 'so' : ref.startsWith('APINV-') ? 'apinv' : ref.startsWith('ARINV-') ? 'arinv' : ref.startsWith('PR-') ? 'payrun' : ref.startsWith('PAY-') ? 'pay' : ref.startsWith('JE-') ? 'je' : ref.startsWith('REQ-') ? 'req' : ref.startsWith('ABS-') ? 'abs' : /^E-\d+$/.test(ref) ? 'emp' : ref.startsWith('SUP-') ? 'sup' : ref.startsWith('CUS-') ? 'cust' : E.item(ref) ? 'item' : null;
     return k ? App.link(k, ref) : esc(ref);
   };
@@ -227,9 +239,10 @@
   App.detail('apinv', (id) => { const i = E.apinv(id); if (!i) return null;
     const pay = E.S.payments.find((p) => p.id === i.paymentId);
     return { title: `Payables invoice ${i.id}`, html: stepFlow(['Entered', 'Matched', 'Validated', 'Paid'], { 'On Hold': 1, Validated: 3, Paid: 4, Cancelled: 0 }[i.status] ?? 0)
-      + dl([['Status', pill(i.status)], ['Supplier', App.link('sup', i.supplierId, E.sup(i.supplierId)?.name)], ['Supplier invoice no.', esc(i.number)], ['Purchase order', App.link('po', i.poId)], ['Invoice date', fdate(i.date)], ['Due', fdate(i.due)], ['Amount', `<span class="num">${fmt(i.total)}</span>`], ['Payment', pay ? App.link('pay', pay.id) : '<span class="muted">Unpaid</span>']])
+      + dl([['Status', pill(i.status)], ['Supplier', App.link('sup', i.supplierId, E.sup(i.supplierId)?.name)], ['Supplier invoice no.', esc(i.number)], ['Purchase order', i.poId ? App.link('po', i.poId) : '<span class="muted">None (direct invoice)</span>'], i.ref && ['Source', refLink(i.ref)], ['Invoice date', fdate(i.date)], ['Due', fdate(i.due)], ['Amount', `<span class="num">${fmt(i.total)}</span>`], ['Payment', pay ? App.link('pay', pay.id) : '<span class="muted">Unpaid</span>']])
       + (i.holds?.length ? `<div class="callout bad"><b>Match holds</b><br>${i.holds.map(esc).join('<br>')}</div>` : '') + (i.holdsReleased?.length ? `<div class="callout warn">Hold released by ${esc(i.releasedBy)}: ${i.holdsReleased.map(esc).join('; ')}</div>` : '')
-      + App.table([{ h: 'Item', f: (l) => App.link('item', l.sku) }, { h: 'Qty', num: true, f: (l) => num(l.qty) }, { h: 'Invoice price', num: true, f: (l) => fmt(l.price) }, { h: 'PO price', num: true, f: (l) => fmt(l.poPrice) }, { h: 'Variance', num: true, f: (l) => fmt((l.price - l.poPrice) * l.qty) }, { h: 'Amount', num: true, f: (l) => fmt(l.qty * l.price) }], i.lines)
+      + (i.poId ? App.table([{ h: 'Item', f: (l) => App.link('item', l.sku) }, { h: 'Qty', num: true, f: (l) => num(l.qty) }, { h: 'Invoice price', num: true, f: (l) => fmt(l.price) }, { h: 'PO price', num: true, f: (l) => fmt(l.poPrice) }, { h: 'Variance', num: true, f: (l) => fmt((l.price - l.poPrice) * l.qty) }, { h: 'Amount', num: true, f: (l) => fmt(l.qty * l.price) }], i.lines)
+        : App.table([{ h: 'Account', f: (l) => App.link('acct', l.acct) + ' ' + esc(E.acct(l.acct)?.name) }, { h: 'Description', f: (l) => esc(l.desc) }, { h: 'Amount', num: true, f: (l) => fmt(l.amount) }], i.lines || []))
       + '<h3 style="margin:0;font-size:14px">Accounting</h3>' + jeList(E.S.journals.filter((j) => j.ref === id || (pay && j.id === pay.journal))),
       buttons: (i.status === 'On Hold' ? App.btn('Cancel invoice', 'ap-cancel', { id }, 'ap.enter', 'danger') + App.btn('Release hold and validate', 'ap-release', { id }, 'ap.release', 'primary') : '') + (i.status === 'Validated' ? App.btn('Pay invoice', 'ap-pay', { id }, 'ap.pay', 'primary') : '') };
   });
@@ -247,7 +260,8 @@
   });
 
   App.detail('arinv', (id) => { const i = E.arinv(id); if (!i) return null; const late = U.daysBetween(i.due, E.S.today);
-    return { title: `Receivables invoice ${i.id}`, html: dl([['Status', pill(i.status !== 'Paid' && late > 0 ? 'Overdue' : i.status)], ['Customer', App.link('cust', i.customerId, E.cust(i.customerId)?.name)], ['Sales order', App.link('so', i.soId)], ['Invoice date', fdate(i.date)], ['Due', fdate(i.due) + (i.status !== 'Paid' && late > 0 ? ` <span class="muted">(${late} days late)</span>` : '')], ['Amount', `<span class="num">${fmt(i.total)}</span>`], ['Received', `<span class="num">${fmt(i.paid)}</span>`], ['Open', `<span class="num">${fmt(i.total - i.paid)}</span>`]])
+    return { title: `Receivables invoice ${i.id}`, html: dl([['Status', pill(i.status !== 'Paid' && late > 0 ? 'Overdue' : i.status)], ['Customer', App.link('cust', i.customerId, E.cust(i.customerId)?.name)], ['Source', i.soId ? App.link('so', i.soId) : refLink(i.ref)], ['Invoice date', fdate(i.date)], ['Due', fdate(i.due) + (i.status !== 'Paid' && late > 0 ? ` <span class="muted">(${late} days late)</span>` : '')], ['Amount', `<span class="num">${fmt(i.total)}</span>`], ['Received', `<span class="num">${fmt(i.paid)}</span>`], ['Open', `<span class="num">${fmt(i.total - i.paid)}</span>`]])
+      + (i.lines ? App.table([{ h: 'Account', f: (l) => App.link('acct', l.acct) + ' ' + esc(E.acct(l.acct)?.name) }, { h: 'Description', f: (l) => esc(l.desc) }, { h: 'Amount', num: true, f: (l) => fmt(l.amount) }], i.lines) : '')
       + '<h3 style="margin:0;font-size:14px">Receipts</h3>' + App.table([{ h: 'Receipt', f: (r) => esc(r.id) }, { h: 'Date', f: (r) => fdate(r.date) }, { h: 'Reference', f: (r) => esc(r.reference) }, { h: 'Amount', num: true, f: (r) => fmt(r.amount) }, { h: 'Journal', f: (r) => App.link('je', r.journal) }], E.S.receipts.filter((r) => r.invoiceId === id), { empty: 'No receipts yet.' })
       + '<h3 style="margin:0;font-size:14px">Accounting</h3>' + jeList(journalsFor(id)),
       buttons: i.status !== 'Paid' ? App.btn('Record receipt', 'ar-receipt', { id }, 'ar.receipt', 'primary') : '' };
@@ -342,8 +356,9 @@
 
   // ---------- nav + router ----------
   function navCounts() {
-    const inbox = E.approvalsInbox().length;
-    return { approvals: inbox };
+    const out = { approvals: E.approvalsInbox().length };
+    for (const v in navCountFns) { try { out[v] = navCountFns[v](); } catch (e) { /* ignore */ } }
+    return out;
   }
   function renderNav() {
     const counts = navCounts();

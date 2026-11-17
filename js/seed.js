@@ -67,6 +67,8 @@
     H('Nadia Petrova', 'HR Generalist', 'People', hrd, 82000, '2024-06-10');
 
     const months = ['2026-07', '2026-08', '2026-09', '2026-10', '2026-11'];
+    const ctx = { E, S, at, ri, rand, asRole, D: (p, d) => `${p}-${String(d).padStart(2, '0')}`, sups, custs, months, buyer };
+    E.hooks.seedSetup.forEach((f) => f(ctx));
     const D = (p, d) => `${p}-${String(d).padStart(2, '0')}`;
     const buyPlan = [
       ['HX-100', 0], ['CB-010', 2], ['HX-220', 1], ['PL-500', 1], ['HX-310', 3], ['KT-900', 0],
@@ -126,6 +128,7 @@
         E.runDepreciation(p);
         at(D(p, 25)); const t = E.util.r2(1800 + rand() * 2600); E.createJournal({ date: D(p, 25), source: 'Payables', desc: 'Sales travel, customer site visits', lines: [{ acct: '6500', dr: t }, { acct: '1000', cr: t }] });
       }
+      E.hooks.seedMonthly.forEach((f) => f(p, ctx));
     });
 
     // ---------- live demo state for "today" (Nov 17) ----------
@@ -140,6 +143,8 @@
     at('2026-11-17');
     E.requestAbsence({ empId: S.employees.find((e) => e.name === 'Hana Sato').id, type: 'Vacation', start: '2026-12-21', end: '2026-12-31', note: 'Year-end travel' });
     E.requestAbsence({ empId: S.employees.find((e) => e.name === 'Kwame Asante').id, type: 'Sick', start: '2026-11-17', end: '2026-11-18', note: '' });
+
+    E.hooks.seedFinal.forEach((f) => f(ctx));
 
     // Close Jul-Sep
     at('2026-11-17'); asRole('Controller', 'Avery Lin', () => { E.closePeriod('2026-07'); E.closePeriod('2026-08'); E.closePeriod('2026-09'); });

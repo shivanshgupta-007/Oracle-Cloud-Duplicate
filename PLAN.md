@@ -80,3 +80,35 @@ See the JSDoc at the top of each function in `js/engine.js` for exact arguments.
 - Permission-gated buttons: `App.btn(label, act, data, perm, cls)`.
 - Doc links: `App.link(kind, id)` → opens detail drawer (`je`, `po`, `emp`, `acct`, `apinv`, `arinv`, `so`, `item`, `payrun`).
 - Colors only via CSS tokens in index.html; numbers use `.num` (tabular, mono).
+
+## Extending the engine (phase 2 modules)
+Each module is three files that only its owner edits: `js/ext-<m>.js` (rules, no DOM),
+`js/views-<m>.js` (screens), `tests/<m>.test.js`. Load order is `js/extensions.json`
+(Node, via `js/load-node.js`) and the matching `<script>` tags in index.html.
+
+ext file skeleton:
+```js
+(function (root) {
+  'use strict';
+  const E = typeof module !== 'undefined' && module.exports ? require('./engine.js') : root.Engine;
+  const { r2, sum, money, periodOf, periodLabel, addDays } = E.util;
+  E.on('state', (S) => { S.assets = S.assets || []; });           // idempotent: fill missing keys only
+  E.on('seedSetup', (ctx) => { E.ensureAccount('1520', 'Vehicles', 'Asset'); });
+  E.on('seedMonthly', (p, ctx) => { /* history for month p, dated within p */ });
+  E.on('seedFinal', (ctx) => { /* live demo state for 2026-11-17 */ });
+  E.on('reconcile', (b) => [{ name: 'Fixed assets', acct: '1500', sub: X, gl: b['1500'] }]); // b = dr-cr balances
+  E.on('approvals', () => [{ kind, id, title, who, date, perm, why }]);
+  E.on('checklist', (p) => [{ task, done, detail, advisory }]);
+  E.on('search', (q, hit) => [{ kind, id, label, sub }]);
+  E.addPerms('Controller', ['fa.edit']);
+  E.extend({ addAsset, ... });                                     // call as E.addAsset from anywhere
+})(typeof window !== 'undefined' ? window : globalThis);
+```
+Rules: every GL effect goes through `E.createJournal` (or `E.createAPInvoice` / `E.createARInvoice`
+for non-PO payables and non-order receivables). Validate first and mutate after, so a throw leaves state
+unchanged. Everything posted in seed hooks must land in Jul–Nov 2026, never leave a Pending journal in
+Jul–Sep (they get closed), and keep `S._clock` via `ctx.at(date)` before writes so the audit trail is dated.
+If you change a journal's lines or status directly, call `E.touch()` (ledger cache).
+
+views file: `App.view('assets', { title, group: 'Financials', render, after })` (group places it in the nav),
+`App.detail('asset', id => ({title, html, buttons}))`, `App.refKind('FA-', 'asset')`, `App.navCount(view, fn)`.

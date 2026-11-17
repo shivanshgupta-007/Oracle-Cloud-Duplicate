@@ -5,7 +5,7 @@
 'use strict';
 const { test, describe, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
-const E = require('../js/engine.js');
+const { E } = require('../js/load-node.js');
 const seed = require('../js/seed.js');
 
 const r2 = (n) => Math.round((+n + Number.EPSILON) * 100) / 100;
