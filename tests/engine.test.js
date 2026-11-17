@@ -598,6 +598,197 @@ describe('depreciation', () => {
 });
 
 // =====================================================================
+describe('core finance: tax, credit memos, reversals, recurring, FX', () => {
+  const corran = () => custByName('Corran Biolabs');
+  const shipTo = (c, lines, date = NOV) => { const o = E.createSO({ customerId: c.id, date, lines }); if (o.status === 'Credit Hold') E.releaseCreditHold(o.id); return { o, inv: E.shipSO(o.id, date) }; };
+  const lineSum = (j, a, side) => r2(j.lines.filter((l) => l.acct === a).reduce((x, l) => x + l[side], 0));
+
+  test('shipment adds sales tax: Dr 1100 gross, Cr 4000 net, Cr 2300 tax', () => {
+    const it = E.item('HX-220'); const b = E.balances();
+    const { o, inv } = shipTo(corran(), [{ sku: 'HX-220', qty: 3 }]);
+    const net = r2(3 * it.price), tax = r2(net * 0.0625);
+    assert.equal(inv.net, net); assert.equal(inv.tax, tax); assert.equal(inv.total, r2(net + tax)); assert.equal(inv.taxCode, 'MA');
+    const j = E.je(inv.journal);
+    assert.equal(lineSum(j, '1100', 'dr'), r2(net + tax)); assert.equal(lineSum(j, '4000', 'cr'), net); assert.equal(lineSum(j, '2300', 'cr'), tax);
+    assert.equal(r2(b['2300'] - E.balance('2300')), tax);
+    assert.equal(o.total, net);
+    // exempt customer: no tax line
+    const ex = shipTo(custByName('Pinecrest University'), [{ sku: 'HX-100', qty: 1 }]).inv;
+    assert.equal(ex.tax, 0); assert.equal(ex.total, ex.net);
+    assertInvariants();
+  });
+  test('credit exposure counts tax on booked orders', () => {
+    const c = E.addCustomer({ name: 'Taxed Co', creditLimit: 1000, taxCode: 'NY' });
+    assert.equal(E.createSO({ customerId: c.id, date: NOV, lines: [{ sku: 'HX-100', qty: 1, price: 950 }] }).status, 'Credit Hold'); // 950 * 1.08875 > 1000
+    const d = E.addCustomer({ name: 'Untaxed Co', creditLimit: 1000, taxCode: 'EXEMPT' });
+    assert.equal(E.createSO({ customerId: d.id, date: NOV, lines: [{ sku: 'HX-100', qty: 1, price: 950 }] }).status, 'Booked');
+  });
+  test('manual AR invoice with tax code, and sales tax remittance', () => {
+    const inv = E.createARInvoice({ customerId: corran().id, date: NOV, taxCode: 'MA', lines: [{ acct: '4100', desc: 'Calibration', amount: 1000 }, { acct: '4100', desc: 'Travel', amount: 200 }] });
+    assert.equal(inv.net, 1200); assert.equal(inv.tax, 75); assert.equal(inv.total, 1275);
+    assertInvariants();
+    const due = E.salesTaxDue('2026-11');
+    assert.equal(r2(-E.balance('2300')), due);
+    assert.throws(() => E.remitSalesTax({ period: '2026-11', date: NOV }), /after the period ends/);
+    assert.throws(() => E.remitSalesTax({ period: '2026-10', date: NOV }), /already remitted/);
+    E.openPeriod('2026-12');
+    const c0 = E.balance('1000');
+    const r = E.remitSalesTax({ period: '2026-11', date: '2026-12-05' });
+    assert.equal(r.amount, due); assert.equal(r2(c0 - E.balance('1000')), due); assert.equal(E.balance('2300'), 0);
+    assert.throws(() => E.remitSalesTax({ period: '2026-11', date: '2026-12-06' }), /already remitted/);
+    assertInvariants();
+  });
+  test('AR credit memo with return to stock', () => {
+    const it = E.item('HX-220'); const { o, inv } = shipTo(corran(), [{ sku: 'HX-220', qty: 10 }]);
+    const uc = o.lines[0].unitCost; const n0 = it.onHand; const b = E.balances();
+    assert.throws(() => E.createARCreditMemo({ invoiceId: inv.id, date: NOV, reason: '', returns: [{ line: 0, qty: 4 }] }), /reason/);
+    const m = E.createARCreditMemo({ invoiceId: inv.id, date: NOV, reason: 'Damaged', returns: [{ line: 0, qty: 4 }] });
+    const gross = r2(4 * it.price * 1.0625), tax = r2(gross * inv.tax / inv.total);
+    assert.equal(m.amount, gross); assert.equal(m.tax, tax); assert.equal(m.net, r2(gross - tax));
+    assert.equal(r2(b['1100'] - E.balance('1100')), gross);
+    assert.equal(r2(E.balance('4000') - b['4000']), r2(gross - tax));
+    assert.equal(r2(E.balance('2300') - b['2300']), tax);
+    assert.equal(it.onHand, n0 + 4);
+    assert.ok(Math.abs(r2(E.balance('1200') - b['1200']) - r2(4 * uc)) < 0.05);
+    assert.ok(Math.abs(r2(b['5000'] - E.balance('5000')) - r2(4 * uc)) < 0.05);
+    assert.equal(E.openAmt(inv), r2(inv.total - gross));
+    assert.ok(E.S.invTxns.some((t) => t.ref === m.id && t.qty === 4 && t.type === 'Customer return'));
+    assertInvariants('after return');
+    assert.throws(() => E.createARCreditMemo({ invoiceId: inv.id, date: NOV, reason: 'x', returns: [{ line: 0, qty: 7 }] }), /not yet returned/);
+    assert.throws(() => E.createARCreditMemo({ invoiceId: inv.id, date: NOV, reason: 'x', amount: E.openAmt(inv) + 1 }), /more than the open balance/);
+    // credit the rest -> Credited, receipt then refused
+    E.createARCreditMemo({ invoiceId: inv.id, date: NOV, reason: 'Goodwill', amount: E.openAmt(inv) });
+    assert.equal(inv.status, 'Credited'); assert.equal(E.openAmt(inv), 0);
+    assert.throws(() => E.applyReceipt({ invoiceId: inv.id, date: NOV, amount: 1 }));
+    assertInvariants('after full credit');
+    // return to stock needs a shipped-order invoice
+    const man = E.createARInvoice({ customerId: corran().id, date: NOV, lines: [{ acct: '4100', amount: 500 }] });
+    assert.throws(() => E.createARCreditMemo({ invoiceId: man.id, date: NOV, reason: 'x', returns: [{ line: 0, qty: 1 }] }), /sales order/);
+  });
+  test('AR credit memo then partial receipt keeps open balance right', () => {
+    const { inv } = shipTo(corran(), [{ sku: 'HX-100', qty: 5 }]);
+    E.createARCreditMemo({ invoiceId: inv.id, date: NOV, reason: 'Price concession', amount: 100 });
+    E.applyReceipt({ invoiceId: inv.id, date: NOV, amount: r2(inv.total - 100) });
+    assert.equal(inv.status, 'Paid'); assert.equal(E.openAmt(inv), 0);
+    assertInvariants();
+  });
+  test('AP credit memo: PO invoice credits 5100; direct invoice credits original accounts', () => {
+    const p = makeReceivedPO('HX-100', 100, 40);
+    const inv = E.enterAPInvoice({ poId: p.id, number: 'CM-1', date: NOV, lines: [{ line: 0, qty: 100, price: 40 }] });
+    const b = E.balances();
+    assert.throws(() => E.createAPCreditMemo({ invoiceId: inv.id, date: NOV, amount: 4000.01, reason: 'x' }), /more than the open/);
+    const m = E.createAPCreditMemo({ invoiceId: inv.id, date: NOV, amount: 100, reason: 'Price adjustment' });
+    assert.equal(r2(E.balance('2000') - b['2000']), 100); assert.equal(r2(b['5100'] - E.balance('5100')), 100);
+    assert.equal(E.openAmt(inv), 3900); assertInvariants('ap cm');
+    const c0 = E.balance('1000'); E.payInvoices([inv.id], NOV); assert.equal(r2(c0 - E.balance('1000')), 3900);
+    assert.throws(() => E.createAPCreditMemo({ invoiceId: inv.id, date: NOV, amount: 1, reason: 'x' }), /Paid/);
+    assertInvariants('ap paid');
+    const d = E.createAPInvoice({ supplierId: supId(), number: 'DIR-1', date: NOV, lines: [{ acct: '6400', amount: 300 }, { acct: '6800', amount: 700 }] });
+    const b2 = E.balances();
+    const m2 = E.createAPCreditMemo({ invoiceId: d.id, date: NOV, amount: 500, reason: 'Service credit' });
+    assert.equal(r2(b2['6400'] - E.balance('6400')), 150); assert.equal(r2(b2['6800'] - E.balance('6800')), 350);
+    E.createAPCreditMemo({ invoiceId: d.id, date: NOV, amount: 500, reason: 'Rest' });
+    assert.equal(d.status, 'Credited'); assert.ok(m.journal && m2.journal);
+    assertInvariants('direct cm');
+  });
+  test('journal reversal: links both ways, once only, open period only, not subledger journals', () => {
+    const j = E.createManualJournal({ date: '2026-10-20', desc: 'Mispost', lines: [{ acct: '6500', dr: 900 }, { acct: '1000', cr: 900 }] });
+    const b = E.balances();
+    assert.throws(() => E.reverseJournal(j.id, '2026-09-30'), /before|Closed/);
+    const r = E.reverseJournal(j.id, '2026-11-01');
+    assert.equal(r.reversalOf, j.id); assert.equal(j.reversedBy, r.id); assert.equal(r.period, '2026-11');
+    assert.equal(E.balance('6500'), r2(b['6500'] - 900));
+    assert.throws(() => E.reverseJournal(j.id, NOV), /already reversed/);
+    assert.throws(() => E.reverseJournal(r.id, NOV), /itself the reversal/);
+    const pend = E.createManualJournal({ date: NOV, desc: 'Big', lines: [{ acct: '6100', dr: 60000 }, { acct: '2200', cr: 60000 }] });
+    assert.throws(() => E.reverseJournal(pend.id, NOV), /Pending/);
+    const shipInv = E.S.arInvoices.find((i) => i.soId);
+    assert.throws(() => E.reverseJournal(shipInv.journal, NOV), /control account/);
+    const payroll = E.je(E.S.payruns[0].journal); E.reverseJournal(payroll.id, NOV); // non-control system journal is reversible
+    assertInvariants();
+  });
+  test('auto-reversing accruals: immediately when next period open, else on openPeriod; pending ones on approval', () => {
+    const a = E.createManualJournal({ date: '2026-10-31', desc: 'Oct accrual', autoReverse: true, lines: [{ acct: '6800', dr: 1200 }, { acct: '2400', cr: 1200 }] });
+    assert.ok(a.reversedBy); assert.equal(E.je(a.reversedBy).date, '2026-11-01'); assert.ok(E.je(a.reversedBy).autoReversal);
+    const n = E.createManualJournal({ date: NOV, desc: 'Nov accrual', autoReverse: true, lines: [{ acct: '6800', dr: 700 }, { acct: '2400', cr: 700 }] });
+    assert.equal(n.reversedBy, undefined);
+    const big = E.createManualJournal({ date: NOV, desc: 'Big accrual', autoReverse: true, lines: [{ acct: '6800', dr: 70000 }, { acct: '2400', cr: 70000 }] });
+    assert.equal(big.status, 'Pending Approval');
+    const seeded = E.S.journals.filter((j) => j.autoReverse && !j.reversedBy && j.status === 'Posted').length;
+    E.openPeriod('2026-12');
+    assert.equal(E.je(n.reversedBy).date, '2026-12-01');
+    assert.equal(E.S.journals.filter((j) => j.autoReverse && !j.reversedBy && j.status === 'Posted').length, 0);
+    assert.ok(seeded >= 1);
+    asUser('Controller', 'Approver Two', () => E.approveJournal(big.id));
+    assert.equal(E.je(big.reversedBy).date, '2026-12-01');
+    E.openPeriod('2027-01'); // no double reversal
+    assert.equal(E.S.journals.filter((j) => j.reversalOf === n.id).length, 1);
+    assertInvariants();
+  });
+  test('recurring journals: earliest open period without one, idempotent per period', () => {
+    const sw = E.S.recurring.find((t) => t.name.startsWith('Software'));
+    const rent = E.S.recurring.find((t) => t.name.startsWith('Office rent'));
+    assert.equal(sw.nextPeriod, '2026-11');
+    const j = E.generateRecurring(sw.id);
+    assert.equal(j.date, '2026-11-06'); assert.equal(j.total, 4850); assert.equal(sw.generated['2026-11'], j.id); assert.ok(j.desc.includes('Nov-26'));
+    assert.throws(() => E.generateRecurring(sw.id), /already generated/);
+    assert.throws(() => E.generateRecurring(sw.id, '2026-11'), /already generated/);
+    assert.throws(() => E.generateRecurring(rent.id), /already generated/);
+    E.openPeriod('2026-12');
+    assert.equal(E.generateRecurring(rent.id).date, '2026-12-01');
+    assert.throws(() => E.generateRecurring(rent.id, '2026-12'), /already generated/);
+    const src = E.createJournal({ date: NOV, desc: 'Cleaning contract', lines: [{ acct: '6200', dr: 640 }, { acct: '1000', cr: 640 }] });
+    const t = E.recurringFromJournal(src.id, { name: 'Cleaning' });
+    assert.equal(t.startPeriod, '2026-12'); assert.equal(t.day, 17);
+    assert.equal(E.generateRecurring(t.id).date, '2026-12-17');
+    assert.throws(() => E.createRecurring({ name: 'Bad', lines: [{ acct: '6200', dr: 1 }, { acct: '1000', cr: 2 }], startPeriod: '2026-12' }), /out of balance/);
+    assertInvariants();
+  });
+  test('FX: EUR direct AP invoice paid at a later rate books realized gain (by hand)', () => {
+    const val = E.S.suppliers.find((x) => x.currency === 'EUR');
+    const inv = E.createAPInvoice({ supplierId: val.id, number: 'EUR-1', date: NOV, currency: 'EUR', lines: [{ acct: '6800', desc: 'Calibration', amount: 10000 }] });
+    assert.equal(inv.rate, 1.1164); assert.equal(inv.fxTotal, 10000); assert.equal(inv.total, 11164);
+    assertInvariants('fx ap booked');
+    E.openPeriod('2026-12');
+    const b = E.balances();
+    const [pay] = E.payInvoices([inv.id], '2026-12-05');
+    assert.equal(pay.amount, 11121); // 10,000 x 1.1121
+    assert.equal(r2(b['1000'] - E.balance('1000')), 11121);
+    assert.equal(r2(E.balance('2000') - b['2000']), 11164);
+    assert.equal(r2(b['7100'] - E.balance('7100')), 43); // gain: credit 7100 43.00
+    assert.equal(inv.status, 'Paid'); assert.equal(E.openAmt(inv), 0); assert.equal(E.fxOpen(inv), 0);
+    assertInvariants('fx ap paid');
+  });
+  test('FX: GBP manual AR invoice collected in two receipts books realized loss (by hand)', () => {
+    const h = custByName('Harrow Analytical Ltd');
+    const inv = E.createARInvoice({ customerId: h.id, date: '2026-10-20', currency: 'GBP', taxCode: 'EU-EXPORT', lines: [{ acct: '4100', amount: 5000 }] });
+    assert.equal(inv.rate, 1.2804); assert.equal(inv.total, 6402); assert.equal(inv.tax, 0);
+    const b = E.balances();
+    const r1 = E.applyReceipt({ invoiceId: inv.id, date: NOV, amount: 2000 });
+    assert.equal(r1.amount, 2548.2); assert.equal(r1.carrying, 2560.8); assert.equal(r1.fxGainLoss, -12.6);
+    assert.equal(inv.status, 'Partially Paid'); assert.equal(E.fxOpen(inv), 3000); assert.equal(E.openAmt(inv), 3841.2);
+    assertInvariants('fx ar partial');
+    const r2nd = E.applyReceipt({ invoiceId: inv.id, date: NOV, amount: 3000 });
+    assert.equal(r2nd.amount, 3822.3); assert.equal(r2nd.carrying, 3841.2);
+    assert.equal(r2(E.balance('7100') - b['7100']), 31.5); // 12.60 + 18.90 loss
+    assert.equal(r2(b['1100'] - E.balance('1100')), 6402);
+    assert.equal(inv.status, 'Paid');
+    assert.throws(() => E.applyReceipt({ invoiceId: inv.id, date: NOV, amount: 1 }), /already paid/);
+    assertInvariants('fx ar paid');
+  });
+  test('FX credit memo relieves at the booking rate; createAPInvoice defaults to USD', () => {
+    const val = E.S.suppliers.find((x) => x.currency === 'EUR');
+    const usd = E.createAPInvoice({ supplierId: val.id, number: 'USD-1', date: NOV, lines: [{ acct: '6800', amount: 500 }] });
+    assert.equal(usd.currency, 'USD'); assert.equal(usd.total, 500);
+    const inv = E.createAPInvoice({ supplierId: val.id, number: 'EUR-2', date: NOV, currency: 'EUR', lines: [{ acct: '6800', amount: 1000 }] });
+    E.createAPCreditMemo({ invoiceId: inv.id, date: NOV, amount: 250, reason: 'Credit' });
+    assert.equal(E.fxOpen(inv), 750); assert.equal(E.openAmt(inv), r2(1116.4 - 279.1));
+    assertInvariants();
+    assert.throws(() => E.createAPInvoice({ supplierId: val.id, number: 'EUR-3', date: NOV, currency: 'JPY', lines: [{ acct: '6800', amount: 1 }] }), /not set up/);
+  });
+});
+
+// =====================================================================
 describe('atomicity contract (snapshot / restore)', () => {
   test('failing shipSO round-trips', () => {
     const o = E.createSO({ customerId: custByName('Corran Biolabs').id, date: NOV, lines: [{ sku: 'HX-310', qty: 1 }, { sku: 'PL-500', qty: 99999 }] });
@@ -717,8 +908,33 @@ describe('fuzz', () => {
         const exp = pick(['6100', '6200', '6400', '6500', '4900']);
         const lines = rnd() < 0.1 ? [{ acct: exp, dr: amt }, { acct: '1000', cr: r2(amt + 0.5) }] : [{ acct: exp, dr: amt }, { acct: '1000', cr: amt }];
         E.S.user = pick(users);
-        E.createManualJournal({ date: date(), desc: 'fuzz', lines });
+        E.createManualJournal({ date: date(), desc: 'fuzz', lines, autoReverse: rnd() < 0.25 });
       },
+      reverse: () => { const j = pick(S().journals.filter((x) => rnd() < 0.3 || x.source === 'Manual')); E.reverseJournal(j.id, date()); },
+      recurring: () => {
+        const r = rnd();
+        if (r < 0.2) { const j = pick(S().journals.filter((x) => x.status === 'Posted')); E.recurringFromJournal(j.id, { name: 'Fuzz ' + ri(1, 1e6) }); }
+        else { const t = pick(S().recurring); E.generateRecurring(t.id, rnd() < 0.3 ? pick(['2026-10', '2026-11', '2026-12']) : undefined); }
+      },
+      arCredit: () => {
+        const i = pick(S().arInvoices.filter((x) => E.openAmt(x) > 0)) || pick(S().arInvoices);
+        const o = i.soId && E.so(i.soId); const ret = o && rnd() < 0.5 ? [{ line: 0, qty: ri(0, o.lines[0].qty + 2) }] : undefined;
+        const roll = rnd(); const amount = ret && roll < 0.5 ? '' : roll < 0.8 ? r2(E.fxOpen(i) * rnd()) : roll < 0.9 ? E.fxOpen(i) : r2(E.fxOpen(i) + 5);
+        E.createARCreditMemo({ invoiceId: i.id, date: date(), amount, reason: rnd() < 0.95 ? 'fuzz credit' : '', returns: ret });
+      },
+      apCredit: () => {
+        const i = pick(S().apInvoices.filter((x) => x.status === 'Validated' || rnd() < 0.05)) || pick(S().apInvoices);
+        const roll = rnd(); E.createAPCreditMemo({ invoiceId: i.id, date: date(), amount: roll < 0.8 ? r2(E.fxOpen(i) * rnd()) : roll < 0.9 ? E.fxOpen(i) : r2(E.fxOpen(i) + 1), reason: 'fuzz' });
+      },
+      fxAP: () => {
+        const s = pick(S().suppliers); const ccy = pick(['EUR', 'GBP', 'USD', undefined]);
+        E.createAPInvoice({ supplierId: s.id, number: `FX-${++invNo}`, date: date(), currency: ccy, lines: [{ acct: pick(['6800', '6400', '6200']), amount: r2(rnd() * 9000) }, ...(rnd() < 0.3 ? [{ acct: '6500', amount: r2(rnd() * 800) }] : [])] });
+      },
+      fxAR: () => {
+        const c = pick(S().customers);
+        E.createARInvoice({ customerId: c.id, date: date(), currency: pick(['GBP', 'EUR', 'USD', undefined]), taxCode: pick(['', 'MA', 'NY', 'EXEMPT', 'EU-EXPORT']), lines: [{ acct: '4100', amount: r2(rnd() * 12000) }] });
+      },
+      remit: () => E.remitSalesTax({ period: pick(['2026-10', '2026-11', '2026-12']), date: date() }),
       approveJE: () => { const j = pick(S().journals.filter((x) => x.status === 'Pending Approval')); E.S.user = pick(users); E.approveJournal(j ? j.id : 'nope'); },
       rejectJE: () => { const j = pick(S().journals.filter((x) => x.status === 'Pending Approval')); E.rejectJournal(j ? j.id : 'nope'); },
       payroll: () => E.runPayroll(pick(['2026-10', '2026-11', '2026-11', '2026-12'])),
@@ -732,7 +948,7 @@ describe('fuzz', () => {
         else { const a = pick(S().absences.filter((x) => x.status === 'Pending')); E.approveAbsence(a ? a.id : 'nope'); }
       },
     };
-    const weights = { createPO: 8, reqFlow: 4, receive: 10, invoice: 10, release: 4, cancelAP: 2, pay: 6, createSO: 10, releaseCredit: 3, ship: 6, cancelSO: 2, receipt: 8, adjust: 5, journal: 6, approveJE: 3, rejectJE: 1, payroll: 2, depr: 2, periods: 3, hcm: 5 };
+    const weights = { createPO: 8, reqFlow: 4, receive: 10, invoice: 10, release: 4, cancelAP: 2, pay: 6, createSO: 10, releaseCredit: 3, ship: 6, cancelSO: 2, receipt: 8, adjust: 5, journal: 6, approveJE: 3, rejectJE: 1, payroll: 2, depr: 2, periods: 3, hcm: 5, reverse: 4, recurring: 3, arCredit: 6, apCredit: 5, fxAP: 5, fxAR: 5, remit: 2 };
     const bag = Object.entries(weights).flatMap(([k, w]) => Array(w).fill(k));
     const stats = { ok: 0, threw: 0, byOp: {} };
 
@@ -745,7 +961,10 @@ describe('fuzz', () => {
         E.S.role = 'Administrator'; E.S.user = 'System Administrator';
         stats.ok++; stats.byOp[op] = (stats.byOp[op] || 0) + 1;
         // new journals must be in periods that were Open before the op
-        for (const j of E.S.journals.slice(nj)) assert.equal(pre.periods[j.period], 'Open', `${label}: ${j.id} posted into ${j.period} (${pre.periods[j.period]})`);
+        for (const j of E.S.journals.slice(nj)) {
+          if (j.autoReversal && E.S.periods[j.period] === 'Open') continue; // accrual reversal into a period this op opened
+          assert.equal(pre.periods[j.period], 'Open', `${label}: ${j.id} posted into ${j.period} (${pre.periods[j.period]})`);
+        }
         // existing journals are immutable except Pending -> Posted/Rejected
         for (let k = 0; k < nj; k++) {
           const a = pre.journals[k], b = E.S.journals[k];
