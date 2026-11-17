@@ -832,6 +832,120 @@ describe('atomicity contract (snapshot / restore)', () => {
 });
 
 // =====================================================================
+describe('legal entities, intercompany, consolidation, departments', () => {
+  beforeEach(() => seed());
+  const ENTS = () => E.entities().map((x) => x.code);
+  function assertEntitiesBalanced(label = '') {
+    for (const e of ENTS()) {
+      const bs = E.balanceSheet(undefined, { entity: e });
+      assert.equal(bs.balanced, true, `${label} ${e} balance sheet`);
+      const tb = E.trialBalance(undefined, { entity: e }); assert.ok(Math.abs(tb.dr - tb.cr) < 0.005, `${label} ${e} TB`);
+    }
+    assert.equal(E.balanceSheet().balanced, true, `${label} consolidated BS`);
+    for (const j of E.S.journals) {
+      const by = {}; j.lines.forEach((l) => { const k = E.lineEntity(l); by[k] = (by[k] || 0) + l.dr - l.cr; });
+      for (const k in by) assert.ok(Math.abs(by[k]) < 0.005, `${label} ${j.id} unbalanced in ${k}`);
+    }
+  }
+  test('seed: two entities, US02 has history, each entity and consolidated BS balance, IC reconciles', () => {
+    assert.deepEqual(ENTS(), ['US01', 'US02']);
+    assert.equal(E.entity('US02').currency, 'USD');
+    assert.ok(E.S.journals.some((j) => j.lines.some((l) => l.entity === 'US02' && j.period === '2026-07')));
+    assert.ok(E.incomeStatement(E.FY_START, '2026-11', { entity: 'US02' }).totalRevenue > 0);
+    assertEntitiesBalanced('seed');
+    const ic = E.reconcile().filter((r) => r.ic); assert.equal(ic.length, 2);
+    ic.forEach((r) => assert.ok(r.ok, r.name));
+    assert.ok(ic.some((r) => r.gl > 0), 'open IC balance at Nov');
+    for (const p of ['2026-07', '2026-08', '2026-09']) assert.equal(E.S.periods[p], 'Closed');
+  });
+  test('createJournal enforces balance per entity with a readable message; atomic', () => {
+    const n = E.S.journals.length;
+    assert.throws(() => E.createJournal({ date: NOV, desc: 'x', lines: [{ acct: '6100', dr: 100, entity: 'US02' }, { acct: '1000', cr: 100 }] }), /out of balance for legal entity US0[12].*intercompany/i);
+    assert.throws(() => E.createJournal({ date: NOV, desc: 'x', lines: [{ acct: '6100', dr: 100, entity: 'US99' }, { acct: '1000', cr: 100, entity: 'US99' }] }), /Legal entity US99 does not exist/);
+    assert.throws(() => E.createJournal({ date: NOV, desc: 'x', lines: [{ acct: '6100', dr: 100, dept: 'Nope' }, { acct: '1000', cr: 100 }] }), /Department Nope/);
+    assert.throws(() => E.createJournal({ date: NOV, desc: 'x', lines: [{ acct: '1800', dr: 100 }, { acct: '1000', cr: 100 }] }), /intercompany/i);
+    assert.equal(E.S.journals.length, n);
+    const j = E.createJournal({ date: NOV, desc: 'US02 own', lines: [{ acct: '6100', dr: 100, entity: 'US02', dept: 'Operations' }, { acct: '1000', cr: 100, entity: 'US02' }] });
+    assert.equal(j.lines[0].entity, 'US02'); assert.equal(j.lines[0].dept, 'Operations');
+    // lines without dimensions keep their original shape
+    const k = E.createJournal({ date: NOV, desc: 'plain', lines: [{ acct: '6100', dr: 5 }, { acct: '1000', cr: 5 }] });
+    assert.deepEqual(Object.keys(k.lines[0]).sort(), ['acct', 'cr', 'dr', 'memo']);
+    // reversal keeps dimensions
+    const r = E.reverseJournal(j.id, NOV); assert.equal(r.lines[0].entity, 'US02'); assert.equal(r.lines[0].dept, 'Operations');
+    assertEntitiesBalanced();
+  });
+  test('intercompany recharge: balanced per entity, eliminated exactly; consolidated = sum - eliminations', () => {
+    const before = E.consolidation('2026-11');
+    const t = E.createIntercompany({ date: NOV, fromEntity: 'US01', toEntity: 'US02', amount: 12345.67, desc: 'Engineering support' });
+    const j = E.je(t.journal);
+    assert.equal(j.lines.filter((l) => l.ic).length, 4, 'recharge: all four lines are intercompany');
+    const c = E.consolidation('2026-11');
+    for (const sec of ['is', 'bs']) for (const r of c[sec].rows) assert.ok(Math.abs(c.entities.reduce((a, k) => a + r.v[k], 0) + r.v.elim - r.v.cons) < 0.005, `${sec} ${r.code}`);
+    const row = (sec, code) => c[sec].rows.find((r) => r.code === code) || { v: { cons: 0, elim: 0, US01: 0, US02: 0 } };
+    assert.equal(row('is', '4950').v.cons, 0); assert.equal(row('is', '6850').v.cons, 0);
+    assert.equal(row('bs', '1800').v.cons, 0); assert.equal(row('bs', '2800').v.cons, 0); assert.equal(row('bs', '1850').v.cons, 0);
+    assert.equal(r2(row('is', '4950').v.US01 - (before.is.rows.find((r) => r.code === '4950')?.v.US01 || 0)), 12345.67);
+    // consolidated statements agree with the consolidation columns and with each entity
+    assert.equal(c.is.totals.net.cons, E.incomeStatement(E.FY_START, '2026-11').netIncome);
+    assert.equal(c.is.totals.net.US01, E.incomeStatement(E.FY_START, '2026-11', { entity: 'US01' }).netIncome);
+    assert.equal(c.is.totals.net.elim, 0, 'recharges net to zero profit');
+    assert.equal(r2(c.is.totals.net.US01 + c.is.totals.net.US02), c.is.totals.net.cons);
+    for (const k of c.cols) assert.equal(c.bs.totals.balanced[k], true, k);
+    assert.equal(c.bs.totals.asset.cons, E.balanceSheet('2026-11').totalAssets);
+    assert.ok(E.reconcile().every((r) => r.ok));
+    // reversal of a subledger IC journal is refused (1800 is a reconciled control account)
+    assert.throws(() => E.reverseJournal(j.id, NOV), /control account 1800/);
+  });
+  test('paid on behalf and settlement keep the cost in the charged entity and IC in agreement', () => {
+    const c02 = E.balance('1000', { entity: 'US02' }), e02 = E.balance('6500', { entity: 'US02' });
+    E.createIntercompany({ date: NOV, fromEntity: 'US01', toEntity: 'US02', fromAcct: '1000', toAcct: '6500', toDept: 'Operations', amount: 500, desc: 'Fuel' });
+    assert.equal(r2(E.balance('6500', { entity: 'US02' }) - e02), 500);
+    assert.equal(E.balance('6500', { entity: 'US02', dept: 'Operations' }) >= 500, true);
+    const pos = E.icBalances('US01', 'US02'); assert.equal(pos.receivable, pos.payable);
+    assert.throws(() => E.settleIntercompany({ date: NOV, payer: 'US02', payee: 'US01', amount: pos.payable + 1 }), /owes US01 only/);
+    E.settleIntercompany({ date: NOV, payer: 'US02', payee: 'US01' });
+    assert.equal(E.icBalances('US01', 'US02').receivable, 0); assert.equal(E.icBalances('US01', 'US02').payable, 0);
+    assert.equal(r2(c02 - pos.payable), E.balance('1000', { entity: 'US02' }));
+    assert.throws(() => E.settleIntercompany({ date: NOV, payer: 'US02', payee: 'US01' }), /owes nothing/);
+    assert.throws(() => E.createIntercompany({ date: NOV, fromEntity: 'US01', toEntity: 'US01', amount: 5, desc: 'x' }), /two different/);
+    assert.throws(() => E.createIntercompany({ date: NOV, fromEntity: 'US01', toEntity: 'US02', amount: 5, desc: 'x', fromAcct: '4950', toAcct: '1500' }), /balance sheet account/);
+    assert.throws(() => E.createIntercompany({ date: '2026-08-10', fromEntity: 'US01', toEntity: 'US02', amount: 5, desc: 'x' }), /Closed/);
+    assertEntitiesBalanced(); assert.ok(E.reconcile().every((r) => r.ok));
+  });
+  test('ledger cache: entity / dept filters never leak between calls', () => {
+    const all = E.balances({ toPeriod: '2026-11' }), u1 = E.balances({ toPeriod: '2026-11', entity: 'US01' }), u2 = E.balances({ toPeriod: '2026-11', entity: 'US02' });
+    for (const a of E.S.accounts) assert.ok(Math.abs(all[a.code] - u1[a.code] - u2[a.code]) < 0.005, a.code);
+    assert.deepEqual(E.balances({ toPeriod: '2026-11', entity: 'All' }), all);
+    assert.notDeepEqual(u1, u2);
+    assert.deepEqual(E.balances({ toPeriod: '2026-11' }), all, 'unfiltered call after filtered ones');
+    const eng = E.balances({ dept: 'Engineering' }); assert.notEqual(eng['6000'], E.balances()['6000']);
+    u1['1000'] = -1; assert.notEqual(E.balances({ toPeriod: '2026-11', entity: 'US01' })['1000'], -1, 'returns a copy');
+    // posting invalidates every filtered entry
+    const before = E.balance('6100', { entity: 'US02', dept: 'Operations' });
+    E.createJournal({ date: NOV, desc: 'x', lines: [{ acct: '6100', dr: 10, entity: 'US02', dept: 'Operations' }, { acct: '1000', cr: 10, entity: 'US02' }] });
+    assert.equal(r2(E.balance('6100', { entity: 'US02', dept: 'Operations' }) - before), 10);
+  });
+  test('payroll posts per department lines that sum to gross', () => {
+    const run = E.runPayroll('2026-11'); const j = E.je(run.journal);
+    const g = j.lines.filter((l) => l.acct === '6000'), t = j.lines.filter((l) => l.acct === '6050');
+    assert.ok(g.length > 1 && g.every((l) => l.dept));
+    assert.equal(r2(g.reduce((a, l) => a + l.dr, 0)), run.gross); assert.equal(r2(t.reduce((a, l) => a + l.dr, 0)), run.employerTax);
+    for (const d of new Set(run.slips.map((x) => x.dept))) assert.equal(g.find((l) => l.dept === d).dr, r2(run.slips.filter((x) => x.dept === d).reduce((a, x) => a + x.gross, 0)), d);
+  });
+  test('department P&L totals equal the company income statement (consolidated and per entity)', () => {
+    for (const ent of ['All', 'US01', 'US02']) for (const [f, t] of [[E.FY_START, '2026-11'], ['2026-10', '2026-10']]) {
+      const d = E.deptPL(f, t, { entity: ent }), is = E.incomeStatement(f, t, { entity: ent });
+      assert.ok(Math.abs(d.totals.total.net - is.netIncome) < 0.01, `${ent} ${f} net`);
+      assert.ok(Math.abs(d.totals.total.opex - is.totalOpex) < 0.01, `${ent} opex`);
+      assert.ok(Math.abs(d.totals.total.revenue - is.totalRevenue) < 0.01, `${ent} revenue`);
+      assert.ok(Math.abs(d.depts.reduce((a, x) => a + d.totals[x].net, 0) - is.netIncome) < 0.01);
+    }
+    const d = E.deptPL(E.FY_START, '2026-11');
+    assert.ok(d.totals.Engineering.opex > 0 && d.totals.Sales.opex > 0 && d.depts.includes('Unassigned'));
+  });
+});
+
+// =====================================================================
 describe('fuzz', () => {
   function mulberry32(a) { return function () { a |= 0; a = (a + 0x6d2b79f5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
 
@@ -935,6 +1049,12 @@ describe('fuzz', () => {
         E.createARInvoice({ customerId: c.id, date: date(), currency: pick(['GBP', 'EUR', 'USD', undefined]), taxCode: pick(['', 'MA', 'NY', 'EXEMPT', 'EU-EXPORT']), lines: [{ acct: '4100', amount: r2(rnd() * 12000) }] });
       },
       remit: () => E.remitSalesTax({ period: pick(['2026-10', '2026-11', '2026-12']), date: date() }),
+      ic: () => {
+        const [a, b] = rnd() < 0.5 ? ['US01', 'US02'] : ['US02', 'US01']; const r = rnd();
+        if (r < 0.5) E.createIntercompany({ date: date(), fromEntity: a, toEntity: rnd() < 0.05 ? a : b, amount: rnd() < 0.05 ? -5 : r2(rnd() * 20000), desc: rnd() < 0.95 ? 'fuzz recharge' : '', ...(rnd() < 0.4 ? { fromAcct: '1000', toAcct: pick(['6500', '6000', '6100']) } : {}), toDept: pick(['', 'Operations', 'Sales']) });
+        else if (r < 0.8) E.settleIntercompany({ date: date(), payer: a, payee: b, amount: rnd() < 0.5 ? undefined : r2(rnd() * 15000) });
+        else E.createManualJournal({ date: date(), desc: 'fuzz entity', lines: [{ acct: pick(['6100', '6500']), dr: 300, entity: a, dept: pick(['', 'Finance']) }, { acct: '1000', cr: rnd() < 0.15 ? 300 : 300, entity: rnd() < 0.15 ? b : a }] });
+      },
       approveJE: () => { const j = pick(S().journals.filter((x) => x.status === 'Pending Approval')); E.S.user = pick(users); E.approveJournal(j ? j.id : 'nope'); },
       rejectJE: () => { const j = pick(S().journals.filter((x) => x.status === 'Pending Approval')); E.rejectJournal(j ? j.id : 'nope'); },
       payroll: () => E.runPayroll(pick(['2026-10', '2026-11', '2026-11', '2026-12'])),
@@ -948,7 +1068,7 @@ describe('fuzz', () => {
         else { const a = pick(S().absences.filter((x) => x.status === 'Pending')); E.approveAbsence(a ? a.id : 'nope'); }
       },
     };
-    const weights = { createPO: 8, reqFlow: 4, receive: 10, invoice: 10, release: 4, cancelAP: 2, pay: 6, createSO: 10, releaseCredit: 3, ship: 6, cancelSO: 2, receipt: 8, adjust: 5, journal: 6, approveJE: 3, rejectJE: 1, payroll: 2, depr: 2, periods: 3, hcm: 5, reverse: 4, recurring: 3, arCredit: 6, apCredit: 5, fxAP: 5, fxAR: 5, remit: 2 };
+    const weights = { createPO: 8, reqFlow: 4, receive: 10, invoice: 10, release: 4, cancelAP: 2, pay: 6, createSO: 10, releaseCredit: 3, ship: 6, cancelSO: 2, receipt: 8, adjust: 5, journal: 6, approveJE: 3, rejectJE: 1, payroll: 2, depr: 2, periods: 3, hcm: 5, reverse: 4, recurring: 3, arCredit: 6, apCredit: 5, fxAP: 5, fxAR: 5, remit: 2, ic: 6 };
     const bag = Object.entries(weights).flatMap(([k, w]) => Array(w).fill(k));
     const stats = { ok: 0, threw: 0, byOp: {} };
 
@@ -979,6 +1099,8 @@ describe('fuzz', () => {
         assert.equal(snap(), s, `${label}: restore did not round-trip`);
       }
       assertInvariants(label);
+      for (const e of ['US01', 'US02']) assert.equal(E.balanceSheet(undefined, { entity: e }).balanced, true, `${label}: ${e} BS`);
+      { const c = E.consolidation('2027-06'); for (const k of c.cols) assert.equal(c.bs.totals.balanced[k], true, `${label}: consolidation ${k}`); }
     }
     if (process.env.FUZZ_STATS) console.log(seedNum, JSON.stringify(stats));
     return stats;
