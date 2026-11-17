@@ -14,6 +14,21 @@
   const WITHHOLDING_RATE = 0.22;         // employee tax withheld
   const EMPLOYER_TAX_RATE = 0.0765;      // employer payroll tax
   const DEPRECIATION_MONTHS = 60;
+  const STATE_VERSION = 2;
+  const FUNCTIONAL = 'USD';
+  const TAX_CODES = [
+    { code: 'MA', name: 'Massachusetts 6.25%', rate: 0.0625 },
+    { code: 'NY', name: 'New York 8.875%', rate: 0.08875 },
+    { code: 'NJ', name: 'New Jersey 6.625%', rate: 0.06625 },
+    { code: 'EXEMPT', name: 'Exempt (public body or resale)', rate: 0 },
+    { code: 'EU-EXPORT', name: 'Export, zero-rated', rate: 0 },
+  ];
+  const CURRENCIES = [{ code: 'USD', name: 'US dollar', symbol: '$' }, { code: 'EUR', name: 'Euro', symbol: '\u20ac' }, { code: 'GBP', name: 'Pound sterling', symbol: '\u00a3' }];
+  // Month-average rates, USD per 1 unit of foreign currency, Jul-26..Jun-27.
+  const FX_SERIES = {
+    EUR: [1.0842, 1.0915, 1.1023, 1.1087, 1.1164, 1.1121, 1.1058, 1.0996, 1.1040, 1.1102, 1.1175, 1.1203],
+    GBP: [1.2718, 1.2795, 1.2862, 1.2804, 1.2741, 1.2829, 1.2903, 1.2876, 1.2950, 1.3012, 1.2968, 1.3044],
+  };
 
   // ---------- small utils ----------
   const r2 = (n) => Math.round((+n + Number.EPSILON) * 100) / 100;
@@ -34,7 +49,7 @@
   const COMMON = ['req.create', 'hr.absence.create'];
   const ROLES = {
     'Administrator': ['*'],
-    'Controller': ['gl.post', 'gl.approve', 'gl.close', 'gl.depr', 'gl.coa', 'ap.release', 'so.release', 'req.approve'],
+    'Controller': ['gl.post', 'gl.approve', 'gl.close', 'gl.depr', 'gl.coa', 'gl.recurring', 'ap.release', 'so.release', 'req.approve'],
     'AP Specialist': ['ap.enter', 'ap.pay', 'supplier.edit'],
     'Buyer': ['po.create', 'po.receive', 'supplier.edit', 'item.edit', 'inv.adjust'],
     'Order Manager': ['so.create', 'so.ship', 'ar.receipt', 'customer.edit'],
@@ -55,7 +70,7 @@
     const periods = {};
     for (let i = 0; i < 12; i++) { const y = 2026 + Math.floor((6 + i) / 12); const m = ((6 + i) % 12) + 1; periods[`${y}-${String(m).padStart(2, '0')}`] = 'Future'; }
     return {
-      version: 1, company: 'Halden Instruments Ltd.', currency: 'USD', today: TODAY, role: 'Administrator', user: 'System Administrator',
+      version: STATE_VERSION, company: 'Halden Instruments Ltd.', currency: 'USD', today: TODAY, role: 'Administrator', user: 'System Administrator',
       seq: {}, periods, accounts: [], journals: [], depreciationRuns: {},
       suppliers: [], customers: [], items: [], invTxns: [],
       reqs: [], pos: [], apInvoices: [], payments: [],
@@ -64,7 +79,20 @@
       audit: [],
     };
   }
-  function applyStateHooks(st) { hooks.state.forEach((f) => f(st)); return st; }
+  /** Core keys added after v1; fills only what is missing so older saved states still load. */
+  function fillCore(st) {
+    const order = Object.keys(st.periods || {}).sort();
+    st.taxCodes = st.taxCodes || TAX_CODES.map((x) => ({ ...x }));
+    st.currencies = st.currencies || CURRENCIES.map((x) => ({ ...x }));
+    if (!st.fxRates) { st.fxRates = {}; order.forEach((p, i) => { st.fxRates[p] = {}; for (const c in FX_SERIES) st.fxRates[p][c] = FX_SERIES[c][i % 12]; }); }
+    st.recurring = st.recurring || []; st.creditMemos = st.creditMemos || []; st.taxRemits = st.taxRemits || [];
+    (st.suppliers || []).forEach((x) => { if (!x.currency) x.currency = FUNCTIONAL; });
+    (st.customers || []).forEach((x) => { if (!x.currency) x.currency = FUNCTIONAL; if (x.taxCode == null) x.taxCode = ''; });
+    if ((st.accounts || []).length) CORE_ACCOUNTS.forEach(([code, name, type]) => { if (!st.accounts.some((a) => a.code === code)) { st.accounts.push({ code, name, type, active: true }); st.accounts.sort((a, b) => a.code.localeCompare(b.code)); } });
+    return st;
+  }
+  const CORE_ACCOUNTS = [['2300', 'Sales tax payable', 'Liability'], ['7100', 'Realized FX gain/loss', 'Expense']];
+  function applyStateHooks(st) { fillCore(st); hooks.state.forEach((f) => f(st)); return st; }
   function reset() { S = applyStateHooks(blankState()); Engine.S = S; return S; }
   function load(obj) { S = applyStateHooks(obj); Engine.S = S; return S; }
   /** Bump the ledger revision. Call after ANY change to a journal's lines or status. */
@@ -116,8 +144,9 @@
   }
 
   /** createJournal({date, source, desc, lines:[{acct, dr, cr, memo}], ref, needsApproval}) */
-  function createJournal({ date, source = 'Manual', desc = '', lines = [], ref = '', needsApproval = false }) {
-    lines = lines.map((l) => ({ acct: String(l.acct), dr: r2(+l.dr || 0), cr: r2(+l.cr || 0), memo: l.memo || '' }))
+  /** Normalizes and validates journal lines (balanced, known accounts). Returns {lines, dr}. */
+  function checkLines(lines) {
+    lines = (lines || []).map((l) => ({ acct: String(l.acct), dr: r2(+l.dr || 0), cr: r2(+l.cr || 0), memo: l.memo || '' }))
       .filter((l) => l.dr || l.cr);
     if (!lines.length) fail('A journal needs at least one line with an amount.');
     for (const l of lines) {
@@ -128,23 +157,102 @@
     }
     const dr = sum(lines, (l) => l.dr), cr = sum(lines, (l) => l.cr);
     if (Math.abs(dr - cr) > 0.004) fail(`Journal is out of balance by ${money(r2(dr - cr))}. Debits must equal credits.`);
+    return { lines, dr };
+  }
+  function createJournal({ date, source = 'Manual', desc = '', lines = [], ref = '', needsApproval = false }) {
+    const chk = checkLines(lines); lines = chk.lines; const dr = chk.dr;
     const p = assertOpen(date);
     const j = { id: nextId('JE'), date, period: p, source, desc, lines, ref, total: dr, status: needsApproval ? 'Pending Approval' : 'Posted', createdBy: S.user, role: S.role };
     S.journals.push(j); touch();
     log(needsApproval ? 'Submitted journal for approval' : 'Posted journal', j.id, `${source}: ${desc} (${money(dr)})`);
     return j;
   }
-  /** Manual journal entered by a person: applies the approval threshold. */
-  function createManualJournal({ date, desc, lines }) {
+  /** Manual journal entered by a person: applies the approval threshold.
+   *  autoReverse: true makes it an accrual that reverses on the first day of the next period
+   *  (as soon as that period is open: immediately, or when it is opened). */
+  function createManualJournal({ date, desc, lines, autoReverse = false }) {
     if (!String(desc || '').trim()) fail('Describe the journal so reviewers know what it is for.');
-    const total = sum(lines, (l) => +l.dr || 0);
-    return createJournal({ date, desc, lines, source: 'Manual', needsApproval: total > JE_APPROVAL_LIMIT });
+    if (autoReverse && isDate(date) && !nextPeriod(periodOf(date))) fail('An auto-reversing accrual needs a following period in the calendar.');
+    const total = sum(lines || [], (l) => +l.dr || 0);
+    const j = createJournal({ date, desc, lines, source: 'Manual', needsApproval: total > JE_APPROVAL_LIMIT });
+    if (autoReverse) { j.autoReverse = true; processAutoReversals(); }
+    return j;
   }
   function approveJournal(id) {
     const j = need(je(id), 'Journal'); if (j.status !== 'Pending Approval') fail(`${id} is not awaiting approval.`);
     assertOpen(j.date); if (j.createdBy === S.user && S.role !== 'Administrator') fail('You cannot approve a journal you created (segregation of duties).');
-    j.status = 'Posted'; j.approvedBy = S.user; touch(); log('Approved journal', id); return j;
+    j.status = 'Posted'; j.approvedBy = S.user; touch(); log('Approved journal', id);
+    if (j.autoReverse) processAutoReversals();
+    return j;
   }
+  const nextPeriod = (p) => { const ks = Object.keys(S.periods).sort(); const i = ks.indexOf(p); return i >= 0 && i < ks.length - 1 ? ks[i + 1] : null; };
+  /** GL accounts that a subledger reconciles to (core + extension reconcile rows). */
+  const controlAccounts = () => new Set(reconcile().map((r) => r.acct).filter(Boolean));
+  /** reverseJournal(id, date): posts the mirror image of a posted journal into an open period. */
+  function reverseJournal(id, date, opts = {}) {
+    const j = need(je(id), 'Journal');
+    if (j.status !== 'Posted') fail(`${id} is ${j.status}. Only posted journals can be reversed.`);
+    if (j.reversedBy) fail(`${id} was already reversed by ${j.reversedBy}.`);
+    if (j.reversalOf) fail(`${id} is itself the reversal of ${j.reversalOf}. Post a new journal instead.`);
+    if (!isDate(date)) fail('Enter a valid reversal date (YYYY-MM-DD).');
+    if (date < j.date) fail(`A reversal cannot be dated before the original journal (${j.date}).`);
+    if (j.source !== 'Manual') {
+      const ctrl = controlAccounts(); const hit = j.lines.find((l) => ctrl.has(l.acct));
+      if (hit) fail(`${id} posts to control account ${hit.acct} ${acct(hit.acct)?.name || ''}. Reverse it through its subledger (for example a credit memo) so the subledger and GL stay in agreement.`);
+    }
+    const r = createJournal({ date, source: j.source, desc: `Reversal of ${j.id}: ${j.desc}`, ref: j.id, lines: j.lines.map((l) => ({ acct: l.acct, dr: l.cr, cr: l.dr, memo: l.memo })) });
+    r.reversalOf = j.id; if (opts.auto) r.autoReversal = true; j.reversedBy = r.id;
+    log(opts.auto ? 'Auto-reversed accrual' : 'Reversed journal', j.id, `${r.id} dated ${date}`);
+    return r;
+  }
+  /** Reverses every posted auto-reversing accrual whose next period is open. Returns the reversals. */
+  function processAutoReversals() {
+    const out = [];
+    S.journals.filter((j) => j.autoReverse && j.status === 'Posted' && !j.reversedBy).forEach((j) => {
+      const np = nextPeriod(j.period); if (np && S.periods[np] === 'Open') out.push(reverseJournal(j.id, np + '-01', { auto: true }));
+    });
+    return out;
+  }
+
+  // ---------- recurring journals ----------
+  const recurring = (id) => S.recurring.find((t) => t.id === id);
+  const recurringNext = (t) => Object.keys(S.periods).sort().find((p) => p >= t.startPeriod && !t.generated[p]) || null;
+  /** createRecurring({name, desc, lines:[{acct, dr, cr, memo}], startPeriod, day, source}) — monthly template. desc may contain {period}. */
+  function createRecurring({ name, desc = '', lines, startPeriod, day = 1, source = 'Recurring', generated = {} }) {
+    name = String(name || '').trim(); if (!name) fail('Give the recurring journal a name.');
+    if (S.recurring.some((t) => t.name.toLowerCase() === name.toLowerCase())) fail(`A recurring journal named ${name} already exists.`);
+    const chk = checkLines(lines);
+    if (!S.periods[startPeriod]) fail('Choose a first period inside the FY2027 calendar.');
+    day = +day; if (!Number.isInteger(day) || day < 1 || day > 31) fail('Day of month must be a whole number from 1 to 31.');
+    const t = { id: nextId('RJ'), name, desc: String(desc || name), lines: chk.lines, total: chk.dr, frequency: 'Monthly', startPeriod, day, source, active: true, generated: { ...generated }, createdBy: S.user };
+    t.nextPeriod = recurringNext(t);
+    S.recurring.push(t); log('Created recurring journal', t.id, `${name} ${money(chk.dr)} monthly from ${periodLabel(startPeriod)}`); return t;
+  }
+  /** Template from an existing posted journal; starts the period after it unless startPeriod is given. */
+  function recurringFromJournal(jeId, { name, startPeriod, day } = {}) {
+    const j = need(je(jeId), 'Journal'); if (j.status !== 'Posted') fail(`${jeId} is ${j.status}. Only posted journals can be made recurring.`);
+    if (j.reversalOf) fail('A reversal cannot be made recurring.');
+    const sp = startPeriod || nextPeriod(j.period) || fail('There is no later period to start from.');
+    return createRecurring({ name: name || j.desc, desc: j.desc, lines: j.lines, startPeriod: sp, day: day || +j.date.slice(8), source: 'Recurring', generated: sp <= j.period ? { [j.period]: j.id } : {} });
+  }
+  /** generateRecurring(id, period?) — posts the template into the given (or earliest open, not yet generated) period. Once per period. */
+  function generateRecurring(id, period) {
+    const t = need(recurring(id), 'Recurring journal'); if (!t.active) fail(`${t.name} is inactive.`);
+    let p = period;
+    if (!p) {
+      p = Object.keys(S.periods).sort().find((x) => x >= t.startPeriod && S.periods[x] === 'Open' && !t.generated[x]);
+      if (!p) fail(`${t.name} is already generated for every open period from ${periodLabel(t.startPeriod)}. Open the next period first.`);
+    } else {
+      if (!S.periods[p]) fail('Choose a period inside the FY2027 calendar.');
+      if (t.generated[p]) fail(`${t.name} was already generated for ${periodLabel(p)} (${t.generated[p]}).`);
+      if (p < t.startPeriod) fail(`${t.name} starts in ${periodLabel(t.startPeriod)}.`);
+    }
+    const dd = Math.min(t.day, +periodEnd(p).slice(8));
+    const j = createJournal({ date: `${p}-${String(dd).padStart(2, '0')}`, source: t.source || 'Recurring', desc: t.desc.replace('{period}', periodLabel(p)), ref: t.id, lines: t.lines });
+    t.generated[p] = j.id; t.nextPeriod = recurringNext(t); t.lastJournal = j.id;
+    log('Generated recurring journal', t.id, `${j.id} for ${periodLabel(p)}`); return j;
+  }
+  function setRecurringActive(id, active) { const t = need(recurring(id), 'Recurring journal'); t.active = !!active; log(active ? 'Activated recurring journal' : 'Paused recurring journal', id); return t; }
   function rejectJournal(id, reason) {
     const j = need(je(id), 'Journal'); if (j.status !== 'Pending Approval') fail(`${id} is not awaiting approval.`);
     j.status = 'Rejected'; j.rejectReason = reason || ''; touch(); log('Rejected journal', id, reason); return j;
@@ -215,13 +323,13 @@
   }
   function reopenPeriod(p) {
     if (S.periods[p] !== 'Closed') fail(`${periodLabel(p)} is not closed.`);
-    S.periods[p] = 'Open'; log('Reopened period', periodLabel(p)); return true;
+    S.periods[p] = 'Open'; log('Reopened period', periodLabel(p)); processAutoReversals(); return true;
   }
   function openPeriod(p) {
     if (S.periods[p] !== 'Future') fail(`${periodLabel(p)} is not a future period.`);
     const earlierFuture = Object.keys(S.periods).filter((x) => x < p && S.periods[x] === 'Future');
     if (earlierFuture.length) fail(`Open ${earlierFuture.map(periodLabel).join(', ')} first. Periods open in order.`);
-    S.periods[p] = 'Open'; log('Opened period', periodLabel(p)); return true;
+    S.periods[p] = 'Open'; log('Opened period', periodLabel(p)); processAutoReversals(); return true;
   }
   function runDepreciation(p) {
     if (S.depreciationRuns[p]) fail(`Depreciation for ${periodLabel(p)} already posted (${S.depreciationRuns[p]}).`);
@@ -233,17 +341,62 @@
   }
 
   // ---------- suppliers / customers / items ----------
-  function addSupplier({ name, terms = 30, site = '', email = '' }) {
+  // ---------- tax and currency ----------
+  const taxCode = (code) => S.taxCodes.find((t) => t.code === code);
+  /** Rate for a tax code; '' or missing code means untaxed (0). */
+  const taxRate = (code) => (code ? need(taxCode(code), `Tax code ${code}`).rate : 0);
+  const currency = (code) => S.currencies.find((c) => c.code === code);
+  /** fxRate(ccy, date) — USD per 1 unit of ccy for the date's period (month-average). */
+  function fxRate(ccy, date) {
+    if (!ccy || ccy === FUNCTIONAL) return 1;
+    if (!currency(ccy)) fail(`Currency ${ccy} is not set up.`);
+    const p = periodOf(date); const r = S.fxRates[p] && S.fxRates[p][ccy];
+    if (!(r > 0)) fail(`No ${ccy} exchange rate is loaded for ${periodLabel(p)}.`);
+    return r;
+  }
+  function setFxRate(period, ccy, rate) {
+    if (!S.periods[period]) fail('Choose a period inside the FY2027 calendar.'); if (!currency(ccy) || ccy === FUNCTIONAL) fail('Choose a foreign currency.');
+    rate = +rate; if (!(rate > 0) || !Number.isFinite(rate)) fail('Exchange rate must be greater than zero.');
+    S.fxRates[period] = S.fxRates[period] || {}; S.fxRates[period][ccy] = Math.round(rate * 1e6) / 1e6; log('Set exchange rate', `${ccy} ${periodLabel(period)}`, String(rate)); return rate;
+  }
+  const isFx = (i) => !!i.currency && i.currency !== FUNCTIONAL;
+  /** Functional (USD) open balance of an AP or AR invoice: total - paid - credited. */
+  const openAmt = (i) => r2(i.total - (i.paid || 0) - (i.credited || 0));
+  /** Open balance in the invoice currency (equals openAmt for USD invoices). */
+  const fxOpen = (i) => (isFx(i) ? r2(i.fxTotal - (i.fxPaid || 0) - (i.fxCredited || 0)) : openAmt(i));
+  const ccyAmt = (n, ccy) => (!ccy || ccy === FUNCTIONAL ? money(n) : `${ccy} ${Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
+  /** Functional amount relieved when `amt` (invoice currency) of the open balance is settled; exact on the final settlement. */
+  const relieveFor = (i, amt) => { const o = fxOpen(i); return amt >= o - 0.001 ? openAmt(i) : r2(openAmt(i) * amt / o); };
+  /** Allocates total across weights, rounding remainder onto the last share (sum is exact). */
+  function alloc(total, weights) {
+    const W = weights.reduce((a, b) => a + b, 0); let acc = 0;
+    return weights.map((w, i) => { if (i === weights.length - 1) return r2(total - acc); const v = W ? r2(total * w / W) : 0; acc = r2(acc + v); return v; });
+  }
+  /** After an avg-cost change, true up GL 1200 to the item subledger (rounding only). */
+  function inventoryTrueUp(date, ref, offset) {
+    const diff = r2(sum(S.items, (x) => x.onHand * x.avgCost) - balance('1200'));
+    if (Math.abs(diff) >= 0.01) createJournal({ date, source: 'Inventory', desc: `Average cost rounding ${ref}`, ref, lines: diff > 0 ? [{ acct: '1200', dr: diff }, { acct: offset, cr: diff }] : [{ acct: offset, dr: -diff }, { acct: '1200', cr: -diff }] });
+  }
+  const ensureCoreAccounts = () => CORE_ACCOUNTS.forEach(([c, n, t]) => ensureAccount(c, n, t));
+  const settleStatus = (i, side) => {
+    if (openAmt(i) <= 0.004) { i.status = (i.paid || 0) > 0.004 ? 'Paid' : 'Credited'; return; }
+    if (side === 'AR') i.status = (i.paid || 0) > 0 ? 'Partially Paid' : 'Open';
+  };
+
+  function addSupplier({ name, terms = 30, site = '', email = '', currency: ccy = FUNCTIONAL }) {
     if (!String(name || '').trim()) fail('Supplier name is required.');
     if (S.suppliers.some((s) => s.name.toLowerCase() === name.trim().toLowerCase())) fail(`A supplier named ${name} already exists.`);
-    const s = { id: nextId('SUP'), name: name.trim(), terms: +terms || 30, site, email, active: true };
+    if (!currency(ccy)) fail(`Currency ${ccy} is not set up.`);
+    const s = { id: nextId('SUP'), name: name.trim(), terms: +terms || 30, site, email, currency: ccy, active: true };
     S.suppliers.push(s); log('Created supplier', s.id, s.name); return s;
   }
-  function addCustomer({ name, terms = 30, creditLimit = 50000, segment = '' }) {
+  function addCustomer({ name, terms = 30, creditLimit = 50000, segment = '', currency: ccy = FUNCTIONAL, taxCode: tc = '' }) {
     if (!String(name || '').trim()) fail('Customer name is required.');
     if (S.customers.some((c) => c.name.toLowerCase() === name.trim().toLowerCase())) fail(`A customer named ${name} already exists.`);
     if (!(+creditLimit >= 0)) fail('Credit limit must be zero or more.');
-    const c = { id: nextId('CUS'), name: name.trim(), terms: +terms || 30, creditLimit: r2(+creditLimit), segment, active: true };
+    if (!currency(ccy)) fail(`Currency ${ccy} is not set up.`);
+    if (tc && !taxCode(tc)) fail(`Tax code ${tc} is not set up.`);
+    const c = { id: nextId('CUS'), name: name.trim(), terms: +terms || 30, creditLimit: r2(+creditLimit), segment, currency: ccy, taxCode: tc, active: true };
     S.customers.push(c); log('Created customer', c.id, c.name); return c;
   }
   function addItem({ sku, name, uom = 'Each', price, reorder = 0, cost = 0 }) {
