@@ -60,11 +60,20 @@
   };
 
   // ---------- persistence ----------
-  function save() { try { localStorage.setItem(STORE_KEY, JSON.stringify(E.S)); } catch (e) { /* storage unavailable: session-only */ } }
-  function loadOrSeed() {
-    try { const raw = localStorage.getItem(STORE_KEY); if (raw) { const s = JSON.parse(raw); if (s && s.version === E.STATE_VERSION && s.accounts?.length) { E.load(s); return; } } } catch (e) { /* ignore */ }
-    window.seedDemo(); save();
-  }
+  // Storage adapter. Default: this browser's localStorage. js/api-client.js replaces it in server mode.
+  // load() may return a promise; save(state) runs after every successful action; discard() after a rollback.
+  App.storage = {
+    mode: 'local',
+    load() {
+      try { const raw = localStorage.getItem(STORE_KEY); if (raw) { const s = JSON.parse(raw); if (s && s.version === E.STATE_VERSION && s.accounts?.length) { E.load(s); return; } } } catch (e) { /* ignore */ }
+      window.seedDemo(); this.save(E.S);
+    },
+    save(state) { try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch (e) { /* storage unavailable: session-only */ } },
+    discard() {},
+    reset() { window.seedDemo(); },
+  };
+  function save() { App.storage.save(E.S); }
+  App.save = save;
 
   // ---------- action runner: atomic with rollback ----------
   /** Runs fn; on error restores the snapshot and rethrows. Saves + re-renders on success. */
@@ -76,7 +85,7 @@
       if (okMsg) toast(typeof okMsg === 'function' ? okMsg(res) : okMsg);
       return res;
     } catch (err) {
-      E.load(JSON.parse(snap));
+      E.load(JSON.parse(snap)); App.storage.discard();
       toast(err.message || String(err), 'bad');
       throw err;
     }
@@ -174,7 +183,7 @@
       ev.preventDefault();
       const snap = JSON.stringify(E.S);
       try { const r = opts.onSubmit(d); save(); closeDrawer(); render(); if (opts.success) toast(typeof opts.success === 'function' ? opts.success(r) : opts.success); }
-      catch (err) { E.load(JSON.parse(snap)); $('#drawerErr', d).textContent = err.message || String(err); }
+      catch (err) { E.load(JSON.parse(snap)); App.storage.discard(); $('#drawerErr', d).textContent = err.message || String(err); }
     });
     if (opts.oninput) { d.addEventListener('input', () => opts.oninput(d)); d.addEventListener('change', () => opts.oninput(d)); }
     document.body.append(scrim, d); const appEl = $('.app'); if (appEl) appEl.inert = true;
@@ -520,10 +529,12 @@
   document.addEventListener('keydown', (ev) => { if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'k') { ev.preventDefault(); if ($('#drawer')) closeDrawer(); $('#globalSearch').focus(); $('#globalSearch').select(); } });
 
   App.start = function () {
-    loadOrSeed();
+    return Promise.resolve(App.storage.load()).then(boot, (err) => { $('#content').innerHTML = `<div class="callout bad">Could not load data: ${esc(err.message || err)}</div>`; });
+  };
+  function boot() {
     const sel = $('#roleSel'); sel.innerHTML = Object.keys(E.ROLES).map((r) => `<option>${esc(r)}</option>`).join('');
     sel.addEventListener('change', () => { E.S.role = sel.value; E.S.user = E.ROLE_USERS[sel.value] || E.S.user; E.log('Switched role', sel.value); save(); render(); toast(`You are now ${E.S.user}, acting as ${sel.value}.`); });
-    $('#resetBtn').addEventListener('click', () => App.confirm('Reset demo data', 'Replace everything in this browser with the original demo company? Your changes will be lost.', 'Reset', () => window.seedDemo(), 'Demo data restored.'));
+    $('#resetBtn').addEventListener('click', () => App.confirm('Reset demo data', 'Replace everything in this browser with the original demo company? Your changes will be lost.', 'Reset', () => App.storage.reset(), 'Demo data restored.'));
     $('#menuBtn').addEventListener('click', () => $('#rail').classList.toggle('open'));
     setupSearch();
     window.addEventListener('hashchange', route);

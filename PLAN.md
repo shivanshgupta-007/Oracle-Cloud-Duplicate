@@ -112,3 +112,14 @@ If you change a journal's lines or status directly, call `E.touch()` (ledger cac
 
 views file: `App.view('assets', { title, group: 'Financials', render, after })` (group places it in the nav),
 `App.detail('asset', id => ({title, html, buttons}))`, `App.refKind('FA-', 'asset')`, `App.navCount(view, fn)`.
+
+## Phase 3 (in progress) — file ownership
+| Agent | Owns |
+|---|---|
+| Entities & departments (multi-entity, intercompany, consolidation, dept budgets) | js/engine.js, js/seed.js, js/ui.js, js/views-fin.js, js/views-home.js, js/ext-plan.js, js/views-plan.js, tests/engine.test.js, tests/plan.test.js |
+| Revenue recognition & year-end close | js/ext-revrec.js, js/views-revrec.js, tests/revrec.test.js |
+| Warehouses, transfers, lots & serials | js/ext-wms.js, js/views-wms.js, tests/wms.test.js |
+| Report builder, CSV import/export | js/ext-reports.js, js/views-reports.js, tests/reports.test.js |
+| Server back end, users, API | server/**, js/api-client.js, tests/server.test.js |
+Storage adapter: `App.storage = {mode, load(), save(state), discard(), reset()}` in ui.js; js/config.js sets
+`window.LEDGERLINE_CONFIG.mode` ('local' static; the server serves 'server').
