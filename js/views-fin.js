@@ -32,26 +32,33 @@
       const all = E.S.journals;
       const periodsUsed = [...new Set(all.map((j) => j.period))].sort().reverse();
       const sources = [...new Set(all.map((j) => j.source))].sort();
-      const list = all.filter((j) => (!f.period || j.period === f.period) && (!f.source || j.source === f.source) && (!f.status || j.status === f.status)).slice().sort(byNewest);
+      const isPL = (code) => ['Revenue', 'Expense'].includes(E.acct(code)?.type);
+      const deptHit = (j) => !f.dept || (f.dept === E.UNASSIGNED ? j.lines.some((l) => !l.dept && isPL(l.acct)) : j.lines.some((l) => l.dept === f.dept));
+      const entHit = (j) => !f.entity || j.lines.some((l) => E.lineEntity(l) === f.entity);
+      const list = all.filter((j) => (!f.period || j.period === f.period) && (!f.source || j.source === f.source) && (!f.status || j.status === f.status) && deptHit(j) && entHit(j)).slice().sort(byNewest);
       const pending = all.filter((j) => j.status === 'Pending Approval');
-      const actions = App.btn('Run depreciation', 'fin-depr', {}, 'gl.depr') + App.btn('New journal', 'fin-je-new', {}, 'gl.post', 'primary');
-      const tabs = App.tabs('journals', [['list', `Journals (${all.length})`], ['rec', `Recurring (${E.S.recurring.length})`]]);
+      const actions = App.btn('Run depreciation', 'fin-depr', {}, 'gl.depr') + App.btn('Intercompany', 'fin-ic-new', {}, 'gl.post') + App.btn('New journal', 'fin-je-new', {}, 'gl.post', 'primary');
+      const tabs = App.tabs('journals', [['list', `Journals (${all.length})`], ['rec', `Recurring (${E.S.recurring.length})`], ['ic', `Intercompany (${E.S.intercompany.length})`]]);
+      if (App.tabOf('journals', 'list') === 'ic') return App.head('Financials', 'Journals', 'Charges between legal entities. Each posts one journal that balances in both entities through 1800 Intercompany receivable and 2800 Intercompany payable; recharges and the investment in US02 are eliminated on consolidation.', actions) + tabs + intercompanyHtml();
       if (App.tabOf('journals', 'list') === 'rec') return App.head('Financials', 'Journals', 'Monthly recurring templates. Generate posts a template into the earliest open period that does not have it yet, once per period.', actions) + tabs + recurringHtml();
       const callout = pending.length
         ? `<div class="callout warn" style="margin-bottom:16px"><b>${pending.length} journal${pending.length > 1 ? 's' : ''} awaiting approval</b> (${fmt(U.sum(pending, (j) => j.total))}). Manual journals over ${fmt(E.JE_APPROVAL_LIMIT)} post only after a Controller approves them: ${pending.map((j) => App.link('je', j.id)).join(', ')}.</div>`
         : '';
-      const filters = `<div class="row" style="margin-bottom:14px;max-width:720px">
+      const filters = `<div class="row" style="margin-bottom:14px;max-width:1080px;flex-wrap:wrap">
         ${filterSelect('journals', 'period', 'Period', [['', 'All periods'], ...periodsUsed.map((p) => [p, U.periodLabel(p)])], f.period || '')}
         ${filterSelect('journals', 'source', 'Source', [['', 'All sources'], ...sources.map((s) => [s, s])], f.source || '')}
         ${filterSelect('journals', 'status', 'Status', [['', 'All statuses'], ['Posted', 'Posted'], ['Pending Approval', 'Pending Approval'], ['Rejected', 'Rejected']], f.status || '')}
+        ${filterSelect('journals', 'entity', 'Entity', [['', 'All entities'], ...E.entities().map((x) => [x.code, `${x.code} ${x.name}`])], f.entity || '')}
+        ${filterSelect('journals', 'dept', 'Department', [['', 'All departments'], ...E.S.departments.map((d) => [d, d]), [E.UNASSIGNED, 'Unassigned (P&L lines)']], f.dept || '')}
       </div>`;
-      const filtered = f.period || f.source || f.status;
+      const filtered = f.period || f.source || f.status || f.entity || f.dept;
       const tbl = App.table([
         { h: 'Journal', f: (j) => App.link('je', j.id) },
         { h: 'Date', f: (j) => fd(j.date) },
         { h: 'Period', f: (j) => U.periodLabel(j.period) },
         { h: 'Source', f: (j) => esc(j.source) },
         { h: 'Description', f: (j) => esc(j.desc) },
+        { h: 'Entity', f: (j) => esc([...new Set(j.lines.map((l) => E.lineEntity(l)))].join(', ')) },
         { h: 'Amount', num: true, f: (j) => fmt(j.total) },
         { h: 'Status', f: (j) => pill(j.status) + (j.reversedBy ? ' ' + pill('Reversed', '') : '') + (j.reversalOf ? ' ' + pill('Reversal', 'info') : '') + (j.autoReverse && !j.reversedBy ? ' ' + pill('Accrual', 'warn') : '') },
         { h: 'Created by', f: (j) => esc(j.createdBy) },
@@ -60,6 +67,60 @@
         + tabs + callout + filters + card('', tbl);
     },
     after: bindFilters,
+  });
+  function intercompanyHtml() {
+    const es = E.entities();
+    const pos = []; es.forEach((a) => es.forEach((b) => { if (a.code !== b.code) pos.push(E.icBalances(a.code, b.code)); }));
+    const ptbl = App.table([
+      { h: 'Owed to', f: (x) => esc(x.from) },
+      { h: 'Owed by', f: (x) => esc(x.to) },
+      { h: `Receivable (1800 in creditor)`, num: true, f: (x) => fmt(x.receivable) },
+      { h: `Payable (2800 in debtor)`, num: true, f: (x) => fmt(x.payable) },
+      { h: 'Status', f: (x) => (Math.abs(x.diff) < 0.05 ? pill('Agrees', 'good') : pill(`Differs by ${fmt(x.diff)}`, 'bad')) },
+      { h: '', f: (x) => (x.payable > 0.004 ? App.btn('Settle in cash', 'fin-ic-settle', { payer: x.to, payee: x.from }, 'gl.post', 'sm') : '') },
+    ], pos);
+    const list = E.S.intercompany.slice().sort(byNewest);
+    const tbl = App.table([
+      { h: 'Reference', f: (t) => esc(t.id) },
+      { h: 'Date', f: (t) => fd(t.date) },
+      { h: 'Type', f: (t) => pill(t.kind, t.kind === 'Settlement' ? '' : t.kind === 'Recharge' ? 'info' : 'warn') },
+      { h: 'From', f: (t) => esc(t.fromEntity) },
+      { h: 'To', f: (t) => esc(t.toEntity) },
+      { h: 'Description', f: (t) => esc(t.desc) },
+      { h: 'Amount', num: true, f: (t) => fmt(t.amount) },
+      { h: 'Journal', f: (t) => App.link('je', t.journal) },
+    ], list, { empty: 'No intercompany charges yet. Use Intercompany to post one.' });
+    return card('Open intercompany balances', ptbl) + '<div style="height:14px"></div>' + card('Intercompany transactions', tbl)
+      + `<p class="hint">${es.map((x) => `${esc(x.code)} ${esc(x.name)} (${esc(x.currency)} functional)`).join('; ')}. All entities report in USD, so no currency translation is needed on consolidation.</p>`;
+  }
+  App.act('fin-ic-new', () => {
+    const open = App.openPeriods(); if (!open.length) { App.toast('No accounting period is open.', 'bad'); return; }
+    const defDate = open.includes(curPeriod()) ? E.S.today : U.periodEnd(open[open.length - 1]);
+    const ents = E.entities().map((x) => [x.code, `${x.code} ${x.name}`]);
+    const pl = E.S.accounts.filter((a) => !E.IC_ACCTS.includes(a.code)).map((a) => [a.code, `${a.code} ${a.name}`]);
+    App.drawer('New intercompany charge', `<div class="row">${App.field('Charging entity (from)', App.select('icFrom', ents, 'US01'))}${App.field('Charged entity (to)', App.select('icTo', ents, ents[1] ? ents[1][0] : ''))}</div>
+      <div class="row">${App.field('Date', App.input('icDate', defDate, 'date'))}${App.field('Amount', App.input('icAmt', '', 'number', 'step="0.01" min="0"'))}</div>
+      ${App.field('Description', App.input('icDesc', '', 'text', 'placeholder="e.g. Engineering support recharge, December"'))}
+      <div class="row">${App.field('Credit in charging entity', App.select('icFromAcct', pl, '4950'), '4950 for a recharge, 1000 when paying on the other entity\'s behalf')}${App.field('Debit in charged entity', App.select('icToAcct', pl, '6850'))}</div>
+      <div class="row">${App.field('Department (from)', App.select('icFromDept', App.deptOptions()))}${App.field('Department (to)', App.select('icToDept', App.deptOptions()))}</div>
+      <div class="callout" id="icInfo"></div>`, {
+      submitLabel: 'Post intercompany',
+      oninput: (f) => { const fr = App.val(f, 'icFrom'), to = App.val(f, 'icTo'), a = +App.val(f, 'icAmt') || 0, fa = App.val(f, 'icFromAcct'), ta = App.val(f, 'icToAcct');
+        const pl2 = (c) => ['Revenue', 'Expense'].includes(E.acct(c)?.type);
+        App.$('#icInfo', f).innerHTML = `${esc(fr)}: Dr 1800 Intercompany receivable / Cr ${esc(fa)} <b class="num">${fmt(a)}</b>. ${esc(to)}: Dr ${esc(ta)} / Cr 2800 Intercompany payable. ${pl2(fa) && pl2(ta) ? 'Recharge: income and expense are eliminated on consolidation.' : 'Only 1800 / 2800 are eliminated; the cost stays in the charged entity.'}`; },
+      onSubmit: (f) => E.createIntercompany({ date: App.val(f, 'icDate'), fromEntity: App.val(f, 'icFrom'), toEntity: App.val(f, 'icTo'), amount: App.val(f, 'icAmt'), desc: App.val(f, 'icDesc'), fromAcct: App.val(f, 'icFromAcct'), toAcct: App.val(f, 'icToAcct'), fromDept: App.val(f, 'icFromDept'), toDept: App.val(f, 'icToDept') }),
+      success: (t) => `${t.id} posted as ${t.journal}: ${t.fromEntity} charged ${t.toEntity} ${fmt(t.amount)}.`,
+    });
+  });
+  App.act('fin-ic-settle', (ds) => {
+    const x = E.icBalances(ds.payee, ds.payer); const open = App.openPeriods(); if (!open.length) { App.toast('No accounting period is open.', 'bad'); return; }
+    const defDate = open.includes(curPeriod()) ? E.S.today : U.periodEnd(open[open.length - 1]);
+    App.drawer(`Settle ${ds.payer} payable to ${ds.payee}`, `<p>${esc(ds.payer)} owes ${esc(ds.payee)} <b class="num">${fmt(x.payable)}</b>.</p><div class="row">${App.field('Date', App.input('icsDate', defDate, 'date'))}${App.field('Amount', App.input('icsAmt', x.payable, 'number', 'step="0.01"'))}</div>
+      <div class="callout">${esc(ds.payer)}: Dr 2800 / Cr 1000 Cash. ${esc(ds.payee)}: Dr 1000 Cash / Cr 1800.</div>`, {
+      submitLabel: 'Post settlement',
+      onSubmit: (f) => E.settleIntercompany({ date: App.val(f, 'icsDate'), payer: ds.payer, payee: ds.payee, amount: App.val(f, 'icsAmt') }),
+      success: (t) => `${t.id}: ${t.fromEntity} paid ${t.toEntity} ${fmt(t.amount)}.`,
+    });
   });
   function recurringHtml() {
     const ts = E.S.recurring;
@@ -89,7 +150,9 @@
   });
 
   const jeLineCols = () => [
-    { key: 'acct', label: 'Account', type: 'select', options: App.accountOptions(), width: '34%' },
+    { key: 'acct', label: 'Account', type: 'select', options: App.accountOptions(), width: '28%' },
+    { key: 'entity', label: 'Entity', type: 'select', options: E.entities().map((x) => [x.code, x.code]) },
+    { key: 'dept', label: 'Department', type: 'select', options: App.deptOptions('None') },
     { key: 'memo', label: 'Memo', type: 'text' },
     { key: 'dr', label: 'Debit', type: 'number', width: '17%' },
     { key: 'cr', label: 'Credit', type: 'number', width: '17%' },
@@ -99,7 +162,7 @@
     if (!open.length) { App.toast('No accounting period is open. Open a period on the Accounting periods page first.', 'bad'); return; }
     const defDate = open.includes(curPeriod()) ? E.S.today : U.periodEnd(open[open.length - 1]);
     App.drawer('New manual journal', `<div class="row">${App.field('Accounting date', App.input('jeDate', defDate, 'date'), `Open periods: ${open.map(U.periodLabel).join(', ')}`)}${App.field('Description', App.input('jeDesc', '', 'text', 'placeholder="e.g. Accrue November audit fees"'))}</div>
-      ${App.lines('jeLines', jeLineCols(), [{ acct: '6400' }, { acct: '2200' }])}
+      ${App.lines('jeLines', jeLineCols(), [{ acct: '6400', entity: App.entity() === 'All' ? E.DEFAULT_ENTITY : App.entity() }, { acct: '2200', entity: App.entity() === 'All' ? E.DEFAULT_ENTITY : App.entity() }])}
       <div class="callout" id="jeBal" aria-live="polite"></div>
       <label class="field" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" id="jeAccrual" name="jeAccrual" style="width:auto"><span>Accrual (auto-reverse on the first day of the next period)</span></label>
       <p class="hint">Journals totalling more than ${fmt(E.JE_APPROVAL_LIMIT)} are submitted to a Controller for approval instead of posting immediately. An accrual reverses as soon as the next period is open (now, or when it is opened).</p>`, {
@@ -109,7 +172,11 @@
         const dr = U.sum(ls, (l) => +l.dr || 0), cr = U.sum(ls, (l) => +l.cr || 0), diff = U.r2(dr - cr);
         const el = App.$('#jeBal', form);
         el.className = 'callout ' + (Math.abs(diff) < 0.005 ? (dr > 0 ? 'good' : '') : 'warn');
+        const byEnt = {}; ls.forEach((l) => { const e = l.entity || E.DEFAULT_ENTITY; byEnt[e] = U.r2((byEnt[e] || 0) + (+l.dr || 0) - (+l.cr || 0)); });
+        const offEnt = Object.keys(byEnt).filter((e) => Math.abs(byEnt[e]) >= 0.005);
+        if (offEnt.length && Math.abs(diff) < 0.005) el.className = 'callout warn';
         el.innerHTML = `Debits <b class="num">${fmt(dr)}</b> / Credits <b class="num">${fmt(cr)}</b> / Difference <b class="num">${fmt(diff)}</b>`
+          + (offEnt.length && Math.abs(diff) < 0.005 ? `<br>Each legal entity must balance on its own: ${offEnt.map((e) => `${esc(e)} off by <b class="num">${fmt(byEnt[e])}</b>`).join(', ')}. Use Intercompany to move amounts between entities.` : '')
           + (dr > E.JE_APPROVAL_LIMIT && Math.abs(diff) < 0.005 ? ' <span class="pill warn">Needs approval</span>' : '');
       },
       onSubmit: (form) => E.createManualJournal({ date: App.val(form, 'jeDate'), desc: App.val(form, 'jeDesc'), lines: App.readLines(form, 'jeLines'), autoReverse: App.$('#jeAccrual', form).checked }),
@@ -193,22 +260,26 @@
       const def = App.openPeriods().pop() || plist[plist.length - 1].period;
       const p = plist.some((x) => x.period === f.period) ? f.period : def;
       const tab = App.tabOf('reports', 'tb');
-      const sel = `<div class="row" style="margin-bottom:14px;max-width:260px">${filterSelect('reports', 'period', 'Period', plist.map((x) => [x.period, `${x.label} (${x.status})`]), p)}</div>`;
+      const ent = f.entity && (f.entity === 'All' || E.entity(f.entity)) ? f.entity : App.entity();
+      const showEnt = ['tb', 'is', 'bs', 'dept'].includes(tab);
+      const sel = `<div class="row" style="margin-bottom:14px;max-width:${showEnt ? 640 : 260}px;flex-wrap:wrap">${filterSelect('reports', 'period', 'Period', plist.map((x) => [x.period, `${x.label} (${x.status})`]), p)}${showEnt ? filterSelect('reports', 'entity', 'Legal entity', App.entityOptions(true), ent) : ''}${tab === 'dept' ? filterSelect('reports', 'range', 'Range', [['ytd', 'Fiscal year to date'], ['period', 'Selected period only']], f.range || 'ytd') : ''}</div>`;
       let body = '';
-      if (tab === 'tb') body = trialBalanceHtml(p);
-      else if (tab === 'is') body = incomeHtml(p);
-      else if (tab === 'bs') body = balanceSheetHtml(p);
+      if (tab === 'tb') body = trialBalanceHtml(p, ent);
+      else if (tab === 'is') body = incomeHtml(p, ent);
+      else if (tab === 'bs') body = balanceSheetHtml(p, ent);
+      else if (tab === 'cons') body = consolidationHtml(p);
+      else if (tab === 'dept') body = deptHtml(p, ent, f.range || 'ytd');
       else if (tab === 'tax') body = salesTaxHtml();
       else body = reconHtml();
-      return App.head('Financials', 'Financial reports', `Halden Instruments Ltd., FY2027 (from ${esc(U.periodLabel(E.FY_START))}). Figures include posted journals only; pending approvals are excluded.`)
-        + App.tabs('reports', [['tb', 'Trial balance'], ['is', 'Income statement'], ['bs', 'Balance sheet'], ['rec', 'Reconciliation'], ['tax', 'Sales tax']])
+      return App.head('Financials', 'Financial reports', `${esc(showEnt ? App.entityLabel(ent) : 'Halden group, all legal entities')}, FY2027 (from ${esc(U.periodLabel(E.FY_START))}). Figures include posted journals only; pending approvals are excluded.${showEnt && ent === 'All' && tab !== 'tb' ? ' Consolidated: intercompany balances, recharges and the investment in US02 are eliminated.' : ''}`)
+        + App.tabs('reports', [['tb', 'Trial balance'], ['is', 'Income statement'], ['bs', 'Balance sheet'], ['cons', 'Consolidation'], ['dept', 'By department'], ['rec', 'Reconciliation'], ['tax', 'Sales tax']])
         + (tab === 'rec' || tab === 'tax' ? '' : sel) + body;
     },
     after: bindFilters,
   });
 
-  function trialBalanceHtml(p) {
-    const tb = E.trialBalance(p);
+  function trialBalanceHtml(p, ent) {
+    const tb = E.trialBalance(p, { entity: ent });
     const ok = Math.abs(tb.dr - tb.cr) < 0.005;
     const tbl = App.table([
       { h: 'Account', f: (r) => App.link('acct', r.code) },
@@ -217,11 +288,11 @@
       { h: 'Debit', num: true, f: (r) => (r.dr ? fmt(r.dr) : '') },
       { h: 'Credit', num: true, f: (r) => (r.cr ? fmt(r.cr) : '') },
     ], tb.rows, { empty: 'No posted balances up to this period.', foot: ['Total', '', ok ? pill('Balanced', 'good') : pill('Out of balance', 'bad'), fmt(tb.dr), fmt(tb.cr)] });
-    return card(`Trial balance as of ${esc(fdate(U.periodEnd(p)))}`, tbl, ok ? pill('Balanced', 'good') : pill(`Out of balance by ${fmt(U.r2(tb.dr - tb.cr))}`, 'bad'));
+    return card(`Trial balance as of ${esc(fdate(U.periodEnd(p)))}${ent && ent !== 'All' ? ', ' + esc(ent) : ', all entities (before eliminations)'}`, tbl, ok ? pill('Balanced', 'good') : pill(`Out of balance by ${fmt(U.r2(tb.dr - tb.cr))}`, 'bad'));
   }
 
-  function incomeHtml(p) {
-    const cur = E.incomeStatement(p, p), ytd = E.incomeStatement(E.FY_START, p);
+  function incomeHtml(p, ent) {
+    const cur = E.incomeStatement(p, p, { entity: ent }), ytd = E.incomeStatement(E.FY_START, p, { entity: ent });
     const merge = (key) => {
       const codes = [...new Set([...cur[key], ...ytd[key]].map((r) => r.code))].sort();
       return codes.map((code) => ({ code, name: E.acct(code).name, amount: [cur[key].find((r) => r.code === code)?.amount || 0, ytd[key].find((r) => r.code === code)?.amount || 0] }));
@@ -243,8 +314,8 @@
     return card(`Income statement, ${esc(U.periodLabel(p))} and fiscal year to date`, tbl, ytd.netIncome >= 0 ? pill(`YTD profit ${fmt(ytd.netIncome)}`, 'good') : pill(`YTD loss ${fmt(ytd.netIncome)}`, 'bad'));
   }
 
-  function balanceSheetHtml(p) {
-    const bs = E.balanceSheet(p);
+  function balanceSheetHtml(p, ent) {
+    const bs = E.balanceSheet(p, { entity: ent });
     const one = (list) => list.map((r) => ({ ...r, amount: [r.amount] }));
     const rows = [
       ...sectionRows('Assets', one(bs.assets), 'Total assets', [bs.totalAssets]),
@@ -261,6 +332,51 @@
     ], rows);
     const check = bs.balanced ? pill('Assets = Liabilities + Equity', 'good') : pill(`Out of balance by ${fmt(U.r2(bs.totalAssets - bs.totalLiabilities - bs.totalEquity))}`, 'bad');
     return card(`Balance sheet as of ${esc(fdate(U.periodEnd(p)))}`, tbl, check);
+  }
+
+  function consolidationHtml(p) {
+    const c = E.consolidation(p);
+    const head = { elim: 'Eliminations', cons: 'Consolidated' };
+    const cols = c.cols.map((k) => ({ h: esc(head[k] || k), num: true, f: (r) => (r.v ? (r.bold ? `<b>${fmt(r.v[k])}</b>` : r.v[k] ? fmt(r.v[k]) : '<span class="muted">-</span>') : '') }));
+    const lineCol = { h: 'Line', f: (r) => (r.code ? `<span style="padding-left:16px">${acctLabel(r.code)}</span>${r.ic ? ' ' + pill('IC', 'info') : ''}` : r.label) };
+    const sect = (rows, g, title, total, totLabel) => [{ cls: 'grp', label: title }, ...rows.filter((r) => r.group === g), { cls: 'sub', label: totLabel, v: total, bold: true }];
+    const I = c.is.totals, B = c.bs.totals;
+    const isRows = [...sect(c.is.rows, 'revenue', 'Revenue', I.revenue, 'Total revenue'), ...sect(c.is.rows, 'cogs', 'Cost of sales', I.cogs, 'Total cost of sales'), ...sect(c.is.rows, 'opex', 'Operating expenses', I.opex, 'Total operating expenses'), { cls: 'grp', label: 'Net income', v: I.net, bold: true }];
+    const tle = {}; c.cols.forEach((k) => (tle[k] = U.r2(B.liability[k] + B.totalEquity[k])));
+    const bsRows = [...sect(c.bs.rows, 'asset', 'Assets', B.asset, 'Total assets'), ...sect(c.bs.rows, 'liability', 'Liabilities', B.liability, 'Total liabilities'),
+      ...sect(c.bs.rows, 'equity', 'Equity', B.equity, 'Total share capital and reserves').slice(0, -1), { label: '<span style="padding-left:16px">Current year earnings</span>', v: B.earnings }, { cls: 'sub', label: 'Total equity', v: B.totalEquity, bold: true },
+      { cls: 'grp', label: 'Total liabilities and equity', v: tle, bold: true },
+      { label: 'Balanced', v: null, chk: true }];
+    const bsCols = c.cols.map((k, i) => ({ ...cols[i], f: (r) => (r.chk ? (B.balanced[k] ? pill('Balanced', 'good') : pill('Out of balance', 'bad')) : cols[i].f(r)) }));
+    const allOk = c.cols.every((k) => B.balanced[k]);
+    const sumOk = c.is.rows.concat(c.bs.rows).every((r) => Math.abs(c.entities.reduce((a, k) => a + r.v[k], 0) + r.v.elim - r.v.cons) < 0.005);
+    return `<div class="callout ${allOk && sumOk ? 'good' : 'bad'}" style="margin-bottom:14px">${allOk ? 'Each entity balances on its own and the consolidated balance sheet balances.' : 'At least one balance sheet does not balance.'} Consolidated = ${c.entities.map(esc).join(' + ')} + eliminations${sumOk ? ', on every line' : ' (difference found)'}. All entities are USD functional, so no currency translation is needed.</div>`
+      + card(`Consolidating income statement, ${esc(U.periodLabel(c.fromPeriod))} to ${esc(U.periodLabel(p))}`, stmtTable([lineCol, ...cols], isRows))
+      + '<div style="height:14px"></div>'
+      + card(`Consolidating balance sheet as of ${esc(fdate(U.periodEnd(p)))}`, stmtTable([lineCol, ...bsCols], bsRows), allOk ? pill('All balanced', 'good') : pill('Check balances', 'bad'))
+      + '<p class="hint">Eliminations remove every line flagged intercompany: 1800 / 2800 balances between entities, intercompany service income (4950) against intercompany service charges (6850), and US01\'s investment in US02 (1850) against US02 share capital. Costs that US01 paid on US02\'s behalf stay in US02.</p>';
+  }
+
+  function deptHtml(p, ent, range) {
+    const from = range === 'period' ? p : E.FY_START;
+    const d = E.deptPL(from, p, { entity: ent });
+    const is = E.incomeStatement(from, p, { entity: ent });
+    const cols = [...d.depts, 'total'];
+    const cell = (r, k) => { const v = k === 'total' ? r.total : r.by[k]; return v ? fmt(v) : '<span class="muted">-</span>'; };
+    const rows = [];
+    [['revenue', 'Revenue'], ['cogs', 'Cost of sales'], ['opex', 'Operating expenses']].forEach(([g, t]) => {
+      const list = d.rows.filter((r) => r.group === g); if (!list.length) return;
+      rows.push({ cls: 'grp', label: t }); list.forEach((r) => rows.push(r));
+      rows.push({ cls: 'sub', label: `Total ${t.toLowerCase()}`, tot: g });
+    });
+    rows.push({ cls: 'grp', label: 'Net contribution', tot: 'net' });
+    const tbl = stmtTable([
+      { h: 'Account', f: (r) => (r.code ? `${acctLabel(r.code)}` : `<b>${r.label}</b>`) },
+      ...cols.map((k) => ({ h: esc(k === 'total' ? 'Total' : k), num: true, f: (r) => (r.code ? cell(r, k) : r.tot ? `<b>${fmt(d.totals[k][r.tot])}</b>` : '') })),
+    ], rows);
+    const tie = Math.abs(d.totals.total.net - is.netIncome) < 0.01 && Math.abs(d.totals.total.opex - is.totalOpex) < 0.01;
+    return card(`Profit and loss by department, ${esc(U.periodLabel(from))}${from !== p ? ' to ' + esc(U.periodLabel(p)) : ''}`, tbl, tie ? pill('Ties to income statement', 'good') : pill('Differs from income statement', 'bad'))
+      + `<p class="hint">Lines without a department (rent, utilities, revenue and most subledger postings) show under Unassigned. Payroll posts to each employee's department; other costs carry the department entered on the journal line.${ent === 'All' ? ' Consolidated, so intercompany recharges are eliminated.' : ''}</p>`;
   }
 
   function salesTaxHtml() {
@@ -306,7 +422,7 @@
       { h: 'Difference', num: true, f: (r) => fmt(r.diff) },
       { h: 'Status', f: (r) => (r.ok ? pill('Reconciled', 'good') : pill('Difference', 'bad')) },
     ], rows);
-    return `<div class="callout ${ok ? 'good' : 'bad'}" style="margin-bottom:14px">${ok ? 'All four control accounts tie out to their subledgers.' : 'At least one control account does not agree with its subledger. Open the account to review postings.'} Reconciliation uses current balances across all periods.</div>`
+    return `<div class="callout ${ok ? 'good' : 'bad'}" style="margin-bottom:14px">${ok ? 'All control accounts tie out to their subledgers, and intercompany balances agree between entities.' : 'At least one control account does not agree with its subledger. Open the account to review postings.'} Reconciliation uses current balances across all periods.</div>`
       + card('Subledger to general ledger', tbl)
       + '<p class="hint">Payables: validated, unpaid invoices. Receivables: open customer invoices. Inventory: on hand quantity times average cost. Received not invoiced: PO quantity received but not yet billed, at PO price.</p>';
   }

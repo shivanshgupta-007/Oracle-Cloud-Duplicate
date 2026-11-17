@@ -62,7 +62,7 @@
   // ---------- revenue vs costs chart ----------
   function chartData() {
     return E.periods().filter((p) => p.period >= E.FY_START && p.posted > 0).map((p) => {
-      const is = E.incomeStatement(p.period, p.period);
+      const is = E.incomeStatement(p.period, p.period, { entity: App.entity() });
       const costs = U.r2(is.totalCogs + is.totalOpex);
       return { period: p.period, label: p.label, revenue: is.totalRevenue, costs, net: U.r2(is.totalRevenue - costs), status: p.status };
     });
@@ -151,28 +151,30 @@
     render() {
       const S = E.S;
       const lp = latestOpen() || E.periods().filter((p) => p.posted).map((p) => p.period).pop() || E.FY_START;
-      const ni = E.incomeStatement(E.FY_START, lp).netIncome;
+      const ent = App.entity(), eo = { entity: ent };
+      const ni = E.incomeStatement(E.FY_START, lp, eo).netIncome;
       const active = S.employees.filter((e) => e.status === 'Active');
-      const ar = E.balance('1100'), cash = E.balance('1000'), ap = -E.balance('2000'), inv = E.balance('1200');
+      const ar = E.balance('1100', eo), cash = E.balance('1000', eo), ap = -E.balance('2000', eo), inv = E.balance('1200', eo);
+      const entNote = ent === 'All' ? '' : ` (${ent})`;
       const hour = new Date().getHours();
       const greet = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
       const head = App.head(S.company, `${greet}, ${S.user}`,
-        `Signed in as ${esc(S.role)}. Today is ${esc(fdate(S.today))}. Open periods: ${esc(App.openPeriods().map(U.periodLabel).join(', ') || 'none')}.`,
+        `Signed in as ${esc(S.role)}. Today is ${esc(fdate(S.today))}. Open periods: ${esc(App.openPeriods().map(U.periodLabel).join(', ') || 'none')}. Showing ${esc(App.entityLabel(ent))}; change it with the entity selector at the top.`,
         App.btn('Approvals inbox', 'go', { view: 'approvals' }));
 
       const kpis = `<div class="kpis" style="grid-template-columns:repeat(auto-fit,minmax(148px,1fr))">`
-        + App.kpi('Cash', App.fmt0(cash), 'GL 1000 operating account')
-        + App.kpi('Receivables', App.fmt0(ar), `GL 1100, ${((n) => n + (n === 1 ? ' open invoice' : ' open invoices'))(E.S.arInvoices.filter((i) => i.status !== 'Paid').length)}`)
+        + App.kpi('Cash' + esc(entNote), App.fmt0(cash), 'GL 1000 operating account')
+        + App.kpi('Receivables' + esc(entNote), App.fmt0(ar), `GL 1100, ${((n) => n + (n === 1 ? ' open invoice' : ' open invoices'))(E.S.arInvoices.filter((i) => i.status !== 'Paid').length)}`)
         + App.kpi('Payables', App.fmt0(ap), `GL 2000, ${((n) => n + (n === 1 ? ' invoice to pay' : ' invoices to pay'))(E.S.apInvoices.filter((i) => i.status === 'Validated').length)}`)
         + App.kpi('Inventory', App.fmt0(inv), `GL 1200, ${E.S.items.length} items at average cost`)
-        + App.kpi('Net income FYTD', `<span style="color:${ni < 0 ? 'var(--bad)' : 'inherit'}">${App.fmt0(ni)}</span>`, `${U.periodLabel(E.FY_START)} to ${U.periodLabel(lp)}`)
+        + App.kpi('Net income FYTD' + esc(entNote), `<span style="color:${ni < 0 ? 'var(--bad)' : 'inherit'}">${App.fmt0(ni)}</span>`, `${U.periodLabel(E.FY_START)} to ${U.periodLabel(lp)}`)
         + App.kpi('Active headcount', App.num(active.length), `${App.num(S.departments.length)} departments`)
         + `</div>`;
 
       // (a) chart
       const data = chartData();
       const asTable = !!App.ui.filter.homeChartTable;
-      const chartCard = `<section class="card"><div class="card-h"><span>Revenue and operating costs by month</span>
+      const chartCard = `<section class="card"><div class="card-h"><span>Revenue and operating costs by month${ent === 'All' ? '' : ', ' + esc(ent)}</span>
           <button type="button" class="btn sm" data-act="home-chart-toggle" aria-pressed="${asTable}">${asTable ? 'View as chart' : 'View as table'}</button></div>
         <div class="pad">${!data.length ? '<div class="empty">No postings yet this fiscal year.</div>' : asTable ? chartTable(data) : `
           <div class="legend" style="margin-bottom:8px"><span><i style="background:var(--series-1)"></i>Revenue</span><span><i style="background:var(--series-2)"></i>Costs incl. cost of goods sold</span></div>

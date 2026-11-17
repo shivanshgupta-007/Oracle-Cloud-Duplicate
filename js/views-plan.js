@@ -85,10 +85,13 @@
   function bvaTab() {
     const period = F.planPeriod && E.S.periods[F.planPeriod] ? F.planPeriod : defaultPeriod();
     const ver = E.PLAN_VERSIONS.includes(F.planCompare) ? F.planCompare : E.PLAN_BUDGET;
-    const r = E.budgetVsActual(period, ver);
+    const dept = F.planDept && (E.S.departments.includes(F.planDept) || F.planDept === E.UNASSIGNED) ? F.planDept : 'All';
+    const r = E.budgetVsActual(period, ver, { dept });
     const controls = `<div class="pad" style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end">
       ${App.field('Period', App.select('planPeriod', E.planPeriods().map((p) => [p, U.periodLabel(p) + ` (${E.S.periods[p]})`]), period))}
       ${App.field('Compare actuals to', App.select('planCompare', E.PLAN_VERSIONS, ver))}
+      ${App.field('Department', App.select('planDept', [['All', 'All departments (company)'], ...E.S.departments.map((d) => [d, d]), [E.UNASSIGNED, 'Unassigned']], dept))}
+      ${dept !== 'All' ? `<span class="hint">${esc(dept)}: actuals are journal lines tagged with this department; plan is its share of the company budget (wages by salary, other operating costs by headcount).</span>` : ''}
       <span class="hint">Variance is actual minus plan. Revenue above plan is favourable; costs above plan are unfavourable. YTD runs ${esc(U.periodLabel(r.ytdFrom))} to ${esc(U.periodLabel(period))}.</span></div>`;
     const row = (x, label, cls = '') => `<tr class="${cls === 'indent-row' ? '' : cls}"><td class="${cls === 'indent-row' ? 'indent' : ''}" style="white-space:nowrap">${label}</td>`
       + ['period', 'ytd'].map((k) => `<td class="num">${fmt(x[k].actual)}</td><td class="num">${fmt(x[k].budget)}</td><td class="num">${varCell(x[k])}</td><td class="num">${pct(x[k].pct)}</td><td>${favPill(x[k])}</td>`).join('') + '</tr>';
@@ -105,8 +108,27 @@
         <button type="button" class="btn sm" data-act="plan-chart-toggle" aria-pressed="${asTable}">${asTable ? 'View as chart' : 'View as table'}</button></div>
       <div class="pad">${asTable ? chartTable(data) : `<div class="legend" style="margin-bottom:8px"><span><i style="background:var(--series-1)"></i>Actual revenue</span><span><i style="background:var(--series-2);height:3px;vertical-align:3px"></i>Budget</span></div>
         <div id="planChart" style="position:relative"><div class="pc-svg">${chartSvg(data, 640)}</div><div class="chart-tip" hidden></div></div><p class="hint" style="margin:8px 0 0">Hover or tap a month for the figures.</p>`}</div></section>`;
-    return `<div class="stack"><section class="card">${controls}${table}</section>${chart}</div>`;
+    return `<div class="stack"><section class="card">${controls}${table}</section>${deptCard(period, ver)}${chart}</div>`;
   }
+  /** Operating expense and purchasing budgets by department for the period and YTD. */
+  function deptCard(period, ver) {
+    const rows = E.deptBudgetSummary(period, ver);
+    const tbl = App.table([
+      { h: 'Department', f: (x) => (x.dept === E.UNASSIGNED ? '<span class="muted">Unassigned</span>' : `<button type="button" class="btn sm" data-act="plan-dept" data-dept="${esc(x.dept)}">${esc(x.dept)}</button>`) },
+      { h: `Opex actual ${esc(U.periodLabel(period))}`, num: true, f: (x) => fmt(x.period.actual) },
+      { h: 'Opex plan', num: true, f: (x) => fmt(x.period.budget) },
+      { h: 'Variance', num: true, f: (x) => varCell(x.period) },
+      { h: 'YTD actual', num: true, f: (x) => fmt(x.ytd.actual) },
+      { h: 'YTD plan', num: true, f: (x) => fmt(x.ytd.budget) },
+      { h: 'YTD status', f: (x) => favPill(x.ytd) },
+      { h: 'Purchasing budget', num: true, f: (x) => (x.purchases.budget ? fmt(x.purchases.budget) : '<span class="muted">-</span>') },
+      { h: 'Requisitions committed', num: true, f: (x) => (x.purchases.committed ? fmt(x.purchases.committed) : '<span class="muted">-</span>') },
+      { h: 'Remaining', num: true, f: (x) => (x.purchases.budget || x.purchases.committed ? (x.purchases.remaining < 0 ? `<span style="color:var(--bad)">${fmt(x.purchases.remaining)}</span>` : fmt(x.purchases.remaining)) : '') },
+    ], rows);
+    return `<section class="card"><div class="card-h"><span>Department budgets, ${esc(ver)}</span><span class="muted small">Select a department to filter the table above</span></div>${tbl}
+      <div class="pad"><p class="hint" style="margin:0">Budgetary control: a requisition is checked against its requester's department purchasing budget (account 1200) for the month. Requisitions that exceed it are flagged in Approvals and on the requisition (advisory; they are not blocked).</p></div></section>`;
+  }
+  App.act('plan-dept', (ds) => { F.planDept = ds.dept; App.render(); });
 
   // ---------- tab: budget entry grid ----------
   function entryTab() {
@@ -192,7 +214,7 @@
     },
     after(root) {
       const on = (id, key) => { const el = root.querySelector('#' + id); if (el) el.addEventListener('change', () => { F[key] = el.value; App.render(); }); };
-      on('planPeriod', 'planPeriod'); on('planCompare', 'planCompare'); on('planVersion', 'planVersion');
+      on('planPeriod', 'planPeriod'); on('planCompare', 'planCompare'); on('planDept', 'planDept'); on('planVersion', 'planVersion');
       wireChart(root); wireGrid(root);
     },
   });
