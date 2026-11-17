@@ -6,7 +6,7 @@
 - [x] js/seed.js: Jul–Nov 2026 history; all 4 control accounts reconcile; TB balances; BS balances
 
 ## Next
-- [ ] js/ui.js + index.html shell (router, drawer, toast, tables, actions, persistence)
+- [x] js/ui.js + index.html shell (router, drawer, toast, tables, actions, persistence, all drill-down detail drawers + shared txn forms)
 - [ ] views: home, fin, scm, hcm
 - [ ] tests/engine.test.js
 - [ ] browser QA (Playwright), publish artifact, README

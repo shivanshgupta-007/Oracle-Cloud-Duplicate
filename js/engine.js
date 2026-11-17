@@ -40,6 +40,7 @@
     'Order Manager': ['so.create', 'so.ship', 'ar.receipt', 'customer.edit'],
     'HR Specialist': ['hr.edit', 'hr.absence.approve', 'hr.payroll'],
   };
+  const ROLE_USERS = { 'Administrator': 'System Administrator', 'Controller': 'Avery Lin', 'AP Specialist': 'Sam Achebe', 'Buyer': 'Dana Whitfield', 'Order Manager': 'Ines Duarte', 'HR Specialist': 'Nadia Petrova' };
   const can = (role, perm) => { const p = ROLES[role] || []; return p.includes('*') || p.includes(perm) || COMMON.includes(perm); };
 
   // ---------- state ----------
@@ -48,7 +49,7 @@
     const periods = {};
     for (let i = 0; i < 12; i++) { const y = 2026 + Math.floor((6 + i) / 12); const m = ((6 + i) % 12) + 1; periods[`${y}-${String(m).padStart(2, '0')}`] = 'Future'; }
     return {
-      version: 1, company: 'Halden Instruments Ltd.', currency: 'USD', today: TODAY, role: 'Administrator', user: 'Avery Lin',
+      version: 1, company: 'Halden Instruments Ltd.', currency: 'USD', today: TODAY, role: 'Administrator', user: 'System Administrator',
       seq: {}, periods, accounts: [], journals: [], depreciationRuns: {},
       suppliers: [], customers: [], items: [], invTxns: [],
       reqs: [], pos: [], apInvoices: [], payments: [],
@@ -529,7 +530,7 @@
   }
 
   const Engine = {
-    TODAY, FY_START, REQ_APPROVAL_LIMIT, JE_APPROVAL_LIMIT, PRICE_TOLERANCE, WITHHOLDING_RATE, EMPLOYER_TAX_RATE, DEPRECIATION_MONTHS, ROLES,
+    TODAY, FY_START, ROLE_USERS, REQ_APPROVAL_LIMIT, JE_APPROVAL_LIMIT, PRICE_TOLERANCE, WITHHOLDING_RATE, EMPLOYER_TAX_RATE, DEPRECIATION_MONTHS, ROLES,
     get S() { return S; }, set S(v) { S = v; },
     reset, load, can, log, nextId,
     util: { r2, sum, periodOf, addDays, daysBetween, periodEnd, periodLabel, money, businessDays, isDate },

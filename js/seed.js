@@ -144,7 +144,7 @@
     // Close Jul-Sep
     at('2026-10-08'); asRole('Controller', 'Avery Lin', () => { E.closePeriod('2026-07'); E.closePeriod('2026-08'); E.closePeriod('2026-09'); });
     delete S._clock; delete S._date;
-    S.role = 'Administrator'; S.user = 'Avery Lin';
+    S.role = 'Administrator'; S.user = 'System Administrator';
     return S;
   }
   if (typeof module !== 'undefined' && module.exports) module.exports = seed; else root.seedDemo = seed;
