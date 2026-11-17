@@ -199,7 +199,7 @@
   });
 
   // ---------- Sales orders ----------
-  const openBooked = (cid) => U.sum(E.S.sos.filter((o) => o.customerId === cid && o.status === 'Booked'), (o) => o.total);
+  const openBooked = (cid) => U.sum(E.S.sos.filter((o) => o.customerId === cid && o.status === 'Booked'), (o) => (E.soGross ? E.soGross(o) : o.total)); // incl. sales tax, as the credit check counts it
 
   App.act('so-new', () => {
     const custs = E.S.customers.filter((c) => c.active !== false);

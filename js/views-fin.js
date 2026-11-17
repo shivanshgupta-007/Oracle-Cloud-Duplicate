@@ -72,7 +72,7 @@
       { h: 'Last generated', f: (t) => { const ps = Object.keys(t.generated).sort(); const p = ps[ps.length - 1]; return p ? `${esc(U.periodLabel(p))} ${App.link('je', t.generated[p])}` : '<span class="muted">Never</span>'; } },
       { h: 'Due in open periods', f: (t) => { const due = open.filter((p) => p >= t.startPeriod && !t.generated[p]); return due.length ? pill(due.map(U.periodLabel).join(', '), 'warn') : pill('Up to date', 'good'); } },
       { h: 'Status', f: (t) => (t.active ? pill('Active', 'good') : pill('Paused', '')) },
-      { h: '', f: (t) => (t.active ? App.btn('Generate', 'rj-generate', { id: t.id }, 'gl.recurring', 'sm primary') : '') },
+      { h: '', f: (t) => (t.active && open.some((p) => p >= t.startPeriod && !t.generated[p]) ? App.btn('Generate', 'rj-generate', { id: t.id }, 'gl.recurring', 'sm primary') : '') },
     ], ts, { empty: 'No recurring journals yet. Open a posted journal and choose Make recurring.' });
     return `<div class="actions" style="margin-bottom:12px">${App.btn('New from journal', 'fin-rj-new', {}, 'gl.recurring', 'primary')}</div>` + card('', tbl)
       + '<p class="hint">Each template posts once per period; generating twice for the same period is refused. History posted before a template existed is linked, not reposted.</p>';
@@ -283,7 +283,7 @@
       { h: 'Tax billed', num: true, f: (r) => (r.head ? '' : fmt(r.tax)) },
       { h: 'Credit memos', num: true, f: (r) => (r.head ? '' : r.creditTax ? fmt(-r.creditTax) : '') },
       { h: 'Net tax', num: true, f: (r) => (r.head ? `<b>${fmt(r.due)}</b>` : fmt(r.netTax)) },
-      { h: 'Remittance', f: (r) => !r.head ? '' : r.rem ? `${pill('Remitted', 'good')} ${App.link('je', r.rem.journal)}` : r.due <= 0 ? '<span class="muted">Nothing due</span>' : r.p < cur ? App.btn('Remit sales tax', 'fin-tax-remit', { p: r.p }, 'gl.post', 'sm primary') : pill('Accruing', 'info') },
+      { h: 'Remittance', f: (r) => !r.head ? '' : r.rem ? `${pill('Remitted', 'good')} ${App.link('je', r.rem.journal)}` : r.due <= 0 ? '<span class="muted">Nothing due</span>' : (r.p < cur || App.openPeriods().some((x) => x > r.p)) ? App.btn('Remit sales tax', 'fin-tax-remit', { p: r.p }, 'gl.post', 'sm primary') : pill('Accruing', 'info') },
     ], out, { rowCls: (r) => (r.head ? 'grp' : ''), empty: 'No invoices yet.' });
     return `<div class="kpis">${App.kpi('Sales tax payable', fmt(gl), 'GL 2300')}${App.kpi('Unremitted per report', fmt(unremitted), tie ? 'Agrees with GL 2300' : 'Differs from GL 2300')}${App.kpi('Remitted FY to date', fmt(U.sum(E.S.taxRemits, (x) => x.amount)), `${E.S.taxRemits.length} remittance(s)`)}</div>`
       + card('Sales tax liability by period and tax code', tbl, tie ? pill('Ties to GL', 'good') : pill('Check GL 2300', 'warn'))
