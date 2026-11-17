@@ -9,6 +9,12 @@
   'use strict';
   const PERMS = {
     // general ledger
+    // phase 3: entities, revenue, warehouses, reports, year end
+    createIntercompany: 'gl.post', settleIntercompany: 'gl.post', setDeptBudgetCell: 'plan.edit',
+    createContract: 'so.create', cancelContract: 'so.create', runContractBilling: 'ar.receipt', runRecognition: 'gl.post', yearEndClose: 'gl.close',
+    createTransfer: 'inv.adjust', shipTransfer: 'inv.adjust', receiveTransfer: 'inv.adjust', cancelTransfer: 'inv.adjust',
+    saveReport: 'rpt.edit', renameReport: 'rpt.edit', deleteReport: 'rpt.edit',
+    runImport: ['gl.post', 'supplier.edit', 'customer.edit', 'item.edit', 'hr.edit'],
     createManualJournal: 'gl.post', createJournal: ['gl.post', 'hr.payroll'], reverseJournal: 'gl.post', remitSalesTax: 'gl.post',
     processAutoReversals: 'gl.post', setFxRate: 'gl.post',
     approveJournal: 'gl.approve', rejectJournal: 'gl.approve',
@@ -60,7 +66,7 @@
   };
   const ADMIN_ONLY = 'admin';
   /** Engine plumbing and known reads that look like writes by name: never commands. */
-  const NEVER = new Set(['reset', 'load', 'log', 'nextId', 'on', 'addPerms', 'touch', 'need', 'fail', 'extend', 'can', 'assertOpen', 'ensureAccount',
+  const NEVER = new Set(['runQuery', 'runReport', 'importTemplate', 'cancelPreview', 'wmsSync', 'reset', 'load', 'log', 'nextId', 'on', 'addPerms', 'touch', 'need', 'fail', 'extend', 'can', 'assertOpen', 'ensureAccount',
     'openAR', 'openAmt', 'openHeadcount', 'closeChecklist', 'setup']);
   const WRITE_VERB = /^(create|approve|reject|post|run|close|reopen|open|add|update|set|save|delete|remove|cancel|receive|pay|ship|apply|release|hire|terminate|request|import|transfer|generate|reverse|remit|enter|submit|launch|retire|convert|advance|send|accept|decline|make|issue|copy|spread|mark|match|unmatch|reimburse|bill|expire|recognize|allocate|pick|pack|assign|lock|unlock|confirm|complete|void|refund|adjust|consolidate|eliminate|archive|restore|defer|amortize)[A-Z]/;
   /** True if `fn` is a state-changing engine function (a command). */
