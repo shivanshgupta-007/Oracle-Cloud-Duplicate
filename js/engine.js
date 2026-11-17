@@ -93,8 +93,8 @@
   }
   const CORE_ACCOUNTS = [['2300', 'Sales tax payable', 'Liability'], ['7100', 'Realized FX gain/loss', 'Expense']];
   function applyStateHooks(st) { fillCore(st); hooks.state.forEach((f) => f(st)); return st; }
-  function reset() { S = applyStateHooks(blankState()); Engine.S = S; return S; }
-  function load(obj) { S = applyStateHooks(obj); Engine.S = S; return S; }
+  function reset() { S = blankState(); Engine.S = S; applyStateHooks(S); return S; }
+  function load(obj) { S = obj; Engine.S = S; applyStateHooks(S); return S; }
   /** Bump the ledger revision. Call after ANY change to a journal's lines or status. */
   const touch = () => { S._rev = (S._rev || 0) + 1; };
   /** Add a GL account if missing (no audit entry). For extension setup/state hooks. */
