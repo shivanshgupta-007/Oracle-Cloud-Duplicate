@@ -363,6 +363,7 @@
   }
   App.render = render;
   function route() {
+    if ($('#drawer')) closeDrawer();
     const h = location.hash.replace('#', '');
     const next = views[h] ? h : 'home';
     if (next !== App.current) window.scrollTo(0, 0);

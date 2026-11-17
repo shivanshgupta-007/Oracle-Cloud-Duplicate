@@ -156,8 +156,8 @@
 
       const kpis = `<div class="kpis" style="grid-template-columns:repeat(auto-fit,minmax(148px,1fr))">`
         + App.kpi('Cash', App.fmt0(cash), 'GL 1000 operating account')
-        + App.kpi('Receivables', App.fmt0(ar), `GL 1100, ${E.S.arInvoices.filter((i) => i.status !== 'Paid').length} open invoices`)
-        + App.kpi('Payables', App.fmt0(ap), `GL 2000, ${E.S.apInvoices.filter((i) => i.status === 'Validated').length} invoices to pay`)
+        + App.kpi('Receivables', App.fmt0(ar), `GL 1100, ${((n) => n + (n === 1 ? ' open invoice' : ' open invoices'))(E.S.arInvoices.filter((i) => i.status !== 'Paid').length)}`)
+        + App.kpi('Payables', App.fmt0(ap), `GL 2000, ${((n) => n + (n === 1 ? ' invoice to pay' : ' invoices to pay'))(E.S.apInvoices.filter((i) => i.status === 'Validated').length)}`)
         + App.kpi('Inventory', App.fmt0(inv), `GL 1200, ${E.S.items.length} items at average cost`)
         + App.kpi('Net income FYTD', `<span style="color:${ni < 0 ? 'var(--bad)' : 'inherit'}">${App.fmt0(ni)}</span>`, `${U.periodLabel(E.FY_START)} to ${U.periodLabel(lp)}`)
         + App.kpi('Active headcount', App.num(active.length), `${App.num(S.departments.length)} departments`)

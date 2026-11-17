@@ -506,6 +506,7 @@
   function closeChecklist(p) {
     const pend = S.journals.filter((j) => j.period === p && j.status === 'Pending Approval').length;
     const holds = S.apInvoices.filter((i) => i.status === 'On Hold' && periodOf(i.date) <= p).length;
+    const rec = reconcile().every((r) => r.ok);
     const unreceived = S.pos.filter((x) => ['Open', 'Partially Received'].includes(x.status) && periodOf(x.date) <= p).length;
     return [
       { task: 'Payroll run', done: S.payruns.some((r) => r.period === p), detail: S.payruns.find((r) => r.period === p)?.id || 'Not run yet' },
@@ -513,7 +514,7 @@
       { task: 'Journals approved', done: !pend, detail: pend ? `${pend} awaiting approval` : 'None pending' },
       { task: 'Invoice holds resolved', done: !holds, detail: holds ? `${holds} on hold` : 'No holds' },
       { task: 'Open receipts reviewed', done: !unreceived, detail: unreceived ? `${unreceived} PO(s) not fully received` : 'All received', advisory: true },
-      { task: 'Subledgers reconcile to GL', done: reconcile().every((r) => r.ok), detail: reconcile().every((r) => r.ok) ? 'AP, AR, inventory, accrual tie out' : 'Differences found' },
+      { task: 'Subledgers reconcile to GL', done: rec, detail: rec ? 'AP, AR, inventory, accrual tie out' : 'Differences found' },
       { task: 'Period closed', done: S.periods[p] === 'Closed', detail: S.periods[p] },
     ];
   }

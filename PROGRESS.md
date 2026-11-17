@@ -9,14 +9,14 @@ Run `node --test tests/` and open index.html (or serve with `python3 -m http.ser
 - [x] js/seed.js: Jul–Nov 2026 history (~177 journals); all 4 control accounts reconcile; TB and BS balance
 - [x] index.html + js/ui.js: shell, router, drawers, toasts, tables, line editors, atomic App.run with rollback, localStorage persistence, global search, every drill-down detail panel, shared transaction forms (receive, AP invoice, pay, ship, receipt, adjust, absence, terminate)
 
-## In progress (parallel agents, one file each)
-- [ ] js/views-fin.js — journals, accounts, reports (TB/IS/BS/recon), periods + close checklist, payables, receivables
-- [ ] js/views-scm.js — purchasing (reqs, POs), inventory, sales orders
-- [ ] js/views-home.js + js/views-hcm.js — home dashboard + chart, approvals, audit, security matrix; workforce/org chart, absence, payroll
-- [ ] tests/engine.test.js — invariants, rule tests, 300-op fuzz test
+## Built by parallel agents (one file each), integrated and QA-checked
+- [x] js/views-fin.js — journals, accounts, reports (TB/IS/BS/recon), periods + close checklist, payables, receivables
+- [x] js/views-scm.js — purchasing (reqs, POs), inventory, sales orders
+- [x] js/views-home.js + js/views-hcm.js — home dashboard + chart, approvals, audit, security matrix; workforce/org chart, absence, payroll
+- [x] tests/engine.test.js — invariants, rule tests, 300-op fuzz test
 
 ## Next
-- [ ] Integrate agent output, fix reported engine bugs, full browser QA pass (desktop + 400px, light + dark)
+- [x] Integrate agent output, fix reported engine bugs, full browser QA pass (desktop + 400px, light + dark)
 - [ ] Publish as artifact; push
 
 ## Known decisions
