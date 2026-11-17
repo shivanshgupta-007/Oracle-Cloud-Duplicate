@@ -93,7 +93,7 @@
   App.act('fin-depr', () => {
     const avail = App.openPeriods().filter((p) => !E.S.depreciationRuns[p]);
     if (!avail.length) { App.toast('Depreciation has already been posted for every open period.', 'bad'); return; }
-    const preview = (p) => U.r2(E.balance('1500', { toPeriod: p }) / E.DEPRECIATION_MONTHS);
+    const preview = (p) => (E.depreciationPreview ? E.depreciationPreview(p).total : U.r2(E.balance('1500', { toPeriod: p }) / E.DEPRECIATION_MONTHS));
     App.drawer('Run depreciation', `${App.field('Period', App.select('deprPeriod', avail.map((p) => [p, U.periodLabel(p)]), avail[0]))}
       <div class="callout" id="deprInfo"></div>
       <p class="hint">Straight-line over ${E.DEPRECIATION_MONTHS} months on the equipment cost in 1500. Posts Dr 6300 Depreciation and Cr 1510 Accumulated depreciation, dated the last day of the period.</p>`, {

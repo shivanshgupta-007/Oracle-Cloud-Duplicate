@@ -50,6 +50,8 @@
     /** Extra nav badge counts: App.navCount('assets', () => n). */
     navCount(view, fn) { navCountFns[view] = fn; },
     act(name, fn) { acts[name] = fn; },
+    /** True when an action handler is registered (used for generic extension approval buttons). */
+    hasAct(name) { return !!acts[name]; },
     get role() { return E.S.role; },
     can(perm) { return E.can(E.S.role, perm); },
     current: 'home',

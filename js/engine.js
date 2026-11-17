@@ -642,6 +642,7 @@
     amount = r2(+amount);
     if (!(amount > 0) || !Number.isFinite(amount)) fail('Enter a credit amount greater than zero.');
     if (amount > openF + 0.001) fail(`Credit ${ccyAmt(amount, inv.currency)} is more than the open balance ${ccyAmt(openF, inv.currency)}.`);
+    if (inv.lines && inv.lines.length) { const ctrl = controlAccounts(); const hit = inv.lines.find((l) => ctrl.has(l.acct)); if (hit) fail(`${invoiceId} was credited to control account ${hit.acct}. Adjust it in the module that owns that account.`); }
     const func = relieveFor(inv, amount);
     const tax = inv.tax && inv.total > 0 ? r2(func * inv.tax / inv.total) : 0, net = r2(func - tax);
     if (tax) ensureCoreAccounts();
@@ -680,6 +681,7 @@
     amount = r2(+amount); const openF = fxOpen(inv);
     if (!(amount > 0) || !Number.isFinite(amount)) fail('Enter a credit amount greater than zero.');
     if (amount > openF + 0.001) fail(`Credit ${ccyAmt(amount, inv.currency)} is more than the open balance ${ccyAmt(openF, inv.currency)}.`);
+    if (!inv.poId) { const ctrl = controlAccounts(); const hit = inv.lines.find((l) => ctrl.has(l.acct)); if (hit) fail(`${invoiceId} was charged to control account ${hit.acct} ${acct(hit.acct)?.name || ''}. Adjust it in the module that owns that account so its subledger stays in agreement.`); }
     const func = relieveFor(inv, amount);
     const cr = inv.poId ? [{ acct: '5100', v: func }] : alloc(func, inv.lines.map((l) => l.amount)).map((v, k) => ({ acct: inv.lines[k].acct, v }));
     const lines = [{ acct: '2000', dr: func, memo: s.name }, ...cr.map((x) => (x.v >= 0 ? { acct: x.acct, cr: x.v, memo: 'Supplier credit' } : { acct: x.acct, dr: -x.v, memo: 'Supplier credit' }))];

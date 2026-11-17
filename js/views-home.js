@@ -36,6 +36,10 @@
   const when = (a) => `<span class="mono small" style="white-space:nowrap">${esc(fdate(a.date))}${timeOf(a.ts) ? ' ' + esc(timeOf(a.ts)) : ''}</span>`;
   const KIND_LABEL = { req: 'Requisitions', je: 'Journals', apinv: 'Invoice holds', so: 'Credit holds', abs: 'Absence requests' };
   const KIND_ORDER = ['req', 'je', 'apinv', 'so', 'abs'];
+  const cap = (k) => String(k).charAt(0).toUpperCase() + String(k).slice(1);
+  /** Core kinds first, then any extension kinds in the order they appear. */
+  const kindsOf = (inbox) => [...KIND_ORDER, ...[...new Set(inbox.map((i) => i.kind))].filter((k) => !KIND_ORDER.includes(k))];
+  const labelOf = (k, inbox) => KIND_LABEL[k] || inbox.find((i) => i.kind === k && i.group)?.group || cap(k);
 
   /** Buttons for one inbox item, gated by item.perm (plus segregation of duties for journals). */
   function inboxActions(it, small) {
@@ -50,7 +54,9 @@
     if (it.kind === 'apinv') return App.btn('Release hold', 'ap-release', d, it.perm, 'primary' + sm);
     if (it.kind === 'so') return App.btn('Release credit hold', 'so-release', d, it.perm, 'primary' + sm);
     if (it.kind === 'abs') return App.btn('Reject', 'abs-reject', d, it.perm, 'danger' + sm) + App.btn('Approve', 'abs-approve', d, it.perm, 'primary' + sm);
-    return '';
+    // extension kinds: use `${kind}-reject` / `${kind}-approve` when the module registered them
+    return (App.hasAct(`${it.kind}-reject`) ? App.btn('Reject', `${it.kind}-reject`, d, it.perm, 'danger' + sm) : '')
+      + (App.hasAct(`${it.kind}-approve`) ? App.btn('Approve', `${it.kind}-approve`, d, it.perm, 'primary' + sm) : '');
   }
 
   // ---------- revenue vs costs chart ----------
@@ -226,11 +232,12 @@
         Supplier invoices go on hold when the quantity billed exceeds the quantity received or the price differs from the PO by more than ${Math.round(E.PRICE_TOLERANCE * 100)}%.
         Sales orders go on credit hold when the customer's open receivables plus open orders exceed their credit limit.
         Absence requests are approved by HR.</div>`;
-      const kpis = `<div class="kpis">${KIND_ORDER.map((k) => App.kpi(KIND_LABEL[k], App.num(inbox.filter((i) => i.kind === k).length))).join('')}</div>`;
+      const kinds = kindsOf(inbox);
+      const kpis = `<div class="kpis">${kinds.map((k) => App.kpi(esc(labelOf(k, inbox)), App.num(inbox.filter((i) => i.kind === k).length))).join('')}</div>`;
       if (!inbox.length) return head + kpis + rules + `<section class="card"><div class="empty">Nothing is waiting for you.</div></section>`;
-      const groups = KIND_ORDER.filter((k) => inbox.some((i) => i.kind === k)).map((k) => {
+      const groups = kinds.filter((k) => inbox.some((i) => i.kind === k)).map((k) => {
         const items = inbox.filter((i) => i.kind === k);
-        return `<section class="card"><div class="card-h"><span>${KIND_LABEL[k]}</span><span class="pill warn">${items.length}</span></div>`
+        return `<section class="card"><div class="card-h"><span>${esc(labelOf(k, inbox))}</span><span class="pill warn">${items.length}</span></div>`
           + App.table([
             { h: 'Item', f: (it) => `${App.link(it.kind, it.id)}<div class="small">${esc(it.title)}</div>` },
             { h: 'Reason', f: (it) => `<span class="small">${esc(it.why)}</span>` },
