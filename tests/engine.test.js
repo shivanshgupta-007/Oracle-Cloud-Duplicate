@@ -107,7 +107,7 @@ describe('GL rules', () => {
     assert.throws(() => E.createJournal({ date: NOV, lines: [{ acct: '6100', dr: -10 }, { acct: '1000', cr: -10 }] }), /negative/);
     assert.throws(() => E.createJournal({ date: NOV, lines: [] }), /at least one line/);
   });
-  test('non-finite amounts are rejected (Infinity must not bypass balance check)', { todo: 'engine bug: engine.js:115-116 Infinity-Infinity=NaN passes the balance check' }, () => {
+  test('non-finite amounts are rejected (Infinity must not bypass balance check)', () => {
     assert.throws(() => E.createJournal({ date: NOV, lines: [{ acct: '6100', dr: Infinity }, { acct: '1000', cr: Infinity }] }));
     assertInvariants('after infinity');
   });
@@ -159,8 +159,7 @@ describe('GL rules', () => {
     assert.throws(() => E.closePeriod('2026-11'), /awaiting approval/);
   });
   test('approving a pending journal whose period has since closed throws', () => {
-    const j = E.createManualJournal({ date: '2026-10-20', desc: 'Oct pending', lines: [{ acct: '6100', dr: 60000 }, { acct: '2200', cr: 60000 }] });
-    E.rejectJournal(j.id); // must be resolved to close; verify a stale closed-period approve path by forcing state
+    // closePeriod refuses while pending, so simulate a period closed by other means (e.g. restored state)
     const k = E.createManualJournal({ date: NOV, desc: 'x', lines: [{ acct: '6100', dr: 60000 }, { acct: '2200', cr: 60000 }] });
     E.S.periods['2026-11'] = 'Closed';
     assert.throws(() => asUser('Controller', 'Q', () => E.approveJournal(k.id)), /Closed/);
@@ -217,7 +216,7 @@ describe('procure to pay', () => {
     E.rejectReq(r.id, 'no');
     assert.throws(() => E.createPO({ reqId: r.id, supplierId: supId(), date: NOV }));
   });
-  test('PO from an approved req cannot exceed the approved requisition', { todo: 'engine bug: engine.js:267 createPO({reqId, lines}) ignores the approved req lines/total, so a <=$10k auto-approved req can become a PO of any size' }, () => {
+  test('PO from an approved req cannot exceed the approved requisition', () => {
     const r = E.createReq({ date: NOV, lines: [{ sku: 'HX-100', qty: 10, price: 40 }] });
     assert.equal(r.status, 'Approved');
     assert.throws(() => E.createPO({ reqId: r.id, supplierId: supId(), date: NOV, lines: [{ sku: 'HX-100', qty: 100000, price: 40 }] }));
@@ -308,13 +307,14 @@ describe('procure to pay', () => {
     const b = E.enterAPInvoice({ poId: p.id, number: 'H-2', date: NOV, lines: [{ line: 0, qty: 30, price: 40 }] });
     assert.equal(b.status, 'On Hold');
   });
-  test('splitting the same PO line across invoice lines cannot bill more than received', { todo: 'engine bug: engine.js:315-318 and 330 check each invoice line separately against pl.invoiced, so duplicate {line:0} entries bypass the 3-way qty match' }, () => {
+  test('splitting the same PO line across invoice lines cannot bill more than received', () => {
     const p = makeReceivedPO('HX-100', 100, 40, 60);
-    const inv = E.enterAPInvoice({ poId: p.id, number: 'S-1', date: NOV, lines: [{ line: 0, qty: 50, price: 40 }, { line: 0, qty: 50, price: 40 }] });
-    assert.equal(inv.status, 'On Hold');
+    const s = snap();
+    assert.throws(() => E.enterAPInvoice({ poId: p.id, number: 'S-1', date: NOV, lines: [{ line: 0, qty: 50, price: 40 }, { line: 0, qty: 50, price: 40 }] }), /appears twice/);
+    assert.equal(snap(), s, 'rejected invoice must not mutate state');
     assert.ok(p.lines[0].invoiced <= p.lines[0].received);
   });
-  test('invoice against a non-existent PO line throws a user-readable error', { todo: 'engine bug: engine.js:312 p.lines[+l.line] undefined -> TypeError instead of a user-readable Error' }, () => {
+  test('invoice against a non-existent PO line throws a user-readable error', () => {
     const p = makeReceivedPO('HX-100', 10, 40);
     assert.throws(() => E.enterAPInvoice({ poId: p.id, number: 'X', date: NOV, lines: [{ line: 5, qty: 1, price: 40 }] }), (e) => !(e instanceof TypeError));
   });
@@ -344,7 +344,7 @@ describe('procure to pay', () => {
     assert.throws(() => E.payInvoices([inv.id], NOV), /exceeds operating cash/);
     assert.equal(snap(), s);
   });
-  test('the same invoice listed twice in one payment is not paid twice', { todo: 'engine bug: engine.js:353-366 payInvoices does not de-duplicate ids; [id,id] debits 2000 by 2x the invoice and breaks the AP reconciliation' }, () => {
+  test('the same invoice listed twice in one payment is not paid twice', () => {
     const inv = E.S.apInvoices.find((i) => i.status === 'Validated');
     const c0 = E.balance('1000');
     try { E.payInvoices([inv.id, inv.id], NOV); } catch (e) { /* throwing is also acceptable */ }
@@ -399,10 +399,13 @@ describe('order to cash', () => {
     assert.throws(() => E.shipSO(o.id, NOV), /Not enough stock/);
     assert.equal(snap(), s);
   });
-  test('two lines of the same SKU cannot together ship more than on hand', { todo: 'engine bug: engine.js:393 stock check is per line, so duplicate-SKU lines drive onHand negative (and a later receipt can divide by zero in avgCost, engine.js:294)' }, () => {
+  test('two lines of the same SKU cannot together ship more than on hand', () => {
     const it = E.item('KT-900'); const n = it.onHand;
-    const o = E.createSO({ customerId: custByName('Corran Biolabs').id, date: NOV, lines: [{ sku: 'KT-900', qty: n }, { sku: 'KT-900', qty: n }] });
-    try { E.shipSO(o.id, NOV); } catch (e) { /* expected */ }
+    assert.throws(() => E.createSO({ customerId: custByName('Corran Biolabs').id, date: NOV, lines: [{ sku: 'KT-900', qty: n }, { sku: 'KT-900', qty: n }] }), /twice/);
+    // defence in depth: even a hand-built duplicate-SKU order cannot ship past on-hand
+    const o = E.createSO({ customerId: custByName('Corran Biolabs').id, date: NOV, lines: [{ sku: 'KT-900', qty: n }] });
+    o.lines.push({ sku: 'KT-900', qty: n, price: 310 });
+    assert.throws(() => E.shipSO(o.id, NOV), /Not enough stock/);
     assert.ok(it.onHand >= 0, `onHand ${it.onHand}`);
   });
   test('ship posts COGS at avg cost and AR invoice at order total', () => {
@@ -469,7 +472,7 @@ describe('order to cash', () => {
     const ost = ag.rows.find((r) => r.name === 'Ostrava Foods');
     assert.ok(ost['Current'] < ost.total);
   });
-  test('SO with negative or zero price is rejected', { todo: 'engine bug: engine.js:377 createSO accepts negative unit prices (price:-100 books negative revenue); zero silently falls back to list price' }, () => {
+  test('SO with negative or zero price is rejected', () => {
     assert.throws(() => E.createSO({ customerId: custByName('Solace Pharma').id, date: NOV, lines: [{ sku: 'HX-220', qty: 1, price: -100 }] }));
   });
 });
@@ -515,7 +518,7 @@ describe('HCM and payroll', () => {
     assert.throws(() => E.terminateEmployee(cto.id, NOV), /not active/);
     assert.ok(!E.S.employees.some((e) => e.status === 'Active' && e.managerId === cto.id));
   });
-  test('pending absence approver follows the reassignment when the manager is terminated', { todo: 'engine bug: engine.js:444-446 terminateEmployee moves reports but leaves pending absences with approverId = the terminated manager' }, () => {
+  test('pending absence approver follows the reassignment when the manager is terminated', () => {
     const cto = empByName('Lena Park'); const hana = empByName('Hana Sato');
     E.terminateEmployee(cto.id, NOV);
     const a = E.S.absences.find((x) => x.empId === hana.id && x.status === 'Pending');
@@ -717,7 +720,7 @@ describe('fuzz', () => {
     };
     const weights = { createPO: 8, reqFlow: 4, receive: 10, invoice: 10, release: 4, cancelAP: 2, pay: 6, createSO: 10, releaseCredit: 3, ship: 6, cancelSO: 2, receipt: 8, adjust: 5, journal: 6, approveJE: 3, rejectJE: 1, payroll: 2, depr: 2, periods: 3, hcm: 5 };
     const bag = Object.entries(weights).flatMap(([k, w]) => Array(w).fill(k));
-    const stats = { ok: 0, threw: 0 };
+    const stats = { ok: 0, threw: 0, byOp: {} };
 
     for (let step = 0; step < steps; step++) {
       const op = pick(bag);
@@ -726,7 +729,7 @@ describe('fuzz', () => {
       try {
         ops[op]();
         E.S.role = 'Administrator'; E.S.user = 'System Administrator';
-        stats.ok++;
+        stats.ok++; stats.byOp[op] = (stats.byOp[op] || 0) + 1;
         // new journals must be in periods that were Open before the op
         for (const j of E.S.journals.slice(nj)) assert.equal(pre.periods[j.period], 'Open', `${label}: ${j.id} posted into ${j.period} (${pre.periods[j.period]})`);
         // existing journals are immutable except Pending -> Posted/Rejected
@@ -744,6 +747,7 @@ describe('fuzz', () => {
       }
       assertInvariants(label);
     }
+    if (process.env.FUZZ_STATS) console.log(seedNum, JSON.stringify(stats));
     return stats;
   }
 

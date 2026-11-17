@@ -109,6 +109,7 @@
     if (!lines.length) fail('A journal needs at least one line with an amount.');
     for (const l of lines) {
       if (!acct(l.acct)) fail(`Account ${l.acct} does not exist.`);
+      if (!Number.isFinite(l.dr) || !Number.isFinite(l.cr)) fail('Amounts must be valid numbers.');
       if (l.dr < 0 || l.cr < 0) fail('Amounts cannot be negative. Use the opposite column instead.');
       if (l.dr && l.cr) fail('A line can have a debit or a credit, not both.');
     }
@@ -252,7 +253,7 @@
     if (!isDate(date)) fail('Enter a valid date.');
     lines = (lines || []).filter((l) => l.sku && +l.qty > 0).map((l) => ({ sku: l.sku, qty: +l.qty, price: r2(+l.price || item(l.sku)?.lastCost || 0) }));
     if (!lines.length) fail('Add at least one item with a quantity.');
-    lines.forEach((l) => need(item(l.sku), `Item ${l.sku}`));
+    lines.forEach((l) => { need(item(l.sku), `Item ${l.sku}`); if (!Number.isFinite(l.qty) || !Number.isFinite(l.price) || l.price < 0) fail('Quantities and prices must be valid numbers.'); });
     const total = sum(lines, (l) => l.qty * l.price);
     const r = { id: nextId('REQ'), date, requester: requester || S.user, justification, lines, total, status: total > REQ_APPROVAL_LIMIT ? 'Pending Approval' : 'Approved' };
     S.reqs.push(r); log(r.status === 'Approved' ? 'Created requisition (auto-approved)' : 'Submitted requisition for approval', r.id, money(total)); return r;
@@ -267,7 +268,13 @@
     if (reqId) { r = need(req(reqId), 'Requisition'); if (r.status !== 'Approved') fail(`${reqId} must be approved before it becomes a purchase order (it is ${r.status}).`); if (!lines) lines = r.lines; }
     lines = (lines || []).filter((l) => l.sku && +l.qty > 0).map((l) => ({ sku: l.sku, qty: +l.qty, price: r2(+l.price), received: 0, invoiced: 0 }));
     if (!lines.length) fail('A purchase order needs at least one line.');
-    lines.forEach((l) => { need(item(l.sku), `Item ${l.sku}`); if (!(l.price > 0)) fail(`Enter a price for ${l.sku}.`); });
+    lines.forEach((l) => { need(item(l.sku), `Item ${l.sku}`); if (!(l.price > 0) || !Number.isFinite(l.price)) fail(`Enter a valid price for ${l.sku}.`); if (!Number.isInteger(l.qty)) fail('Quantities must be whole numbers.'); });
+    if (r) {
+      const reqQty = {}; r.lines.forEach((l) => (reqQty[l.sku] = (reqQty[l.sku] || 0) + l.qty));
+      const poQty = {}; lines.forEach((l) => (poQty[l.sku] = (poQty[l.sku] || 0) + l.qty));
+      for (const k in poQty) { if (!reqQty[k]) fail(`${k} is not on requisition ${r.id}.`); if (poQty[k] > reqQty[k]) fail(`${k}: ordering ${poQty[k]} but ${r.id} approved ${reqQty[k]}.`); }
+      const t = sum(lines, (l) => l.qty * l.price); if (t > r2(r.total * 1.1)) fail(`PO total ${money(t)} is more than 10% above the approved requisition (${money(r.total)}). Raise a new requisition.`);
+    }
     const p = { id: nextId('PO'), reqId: reqId || '', supplierId: s.id, date, lines, total: sum(lines, (l) => l.qty * l.price), status: 'Open', buyer: S.user };
     S.pos.push(p); if (r) { r.status = 'Ordered'; r.poId = p.id; }
     log('Created purchase order', p.id, `${s.name} ${money(p.total)}`); return p;
@@ -291,7 +298,7 @@
     const j = createJournal({ date, source: 'Receiving', desc: `Receipt against ${poId} (${sup(p.supplierId).name})`, ref: poId, lines: [{ acct: '1200', dr: value }, { acct: '2100', cr: value }] });
     for (const { l, q } of recs) {
       const it = item(l.sku);
-      it.avgCost = r2((it.onHand * it.avgCost + q * l.price) / (it.onHand + q));
+      it.avgCost = it.onHand > 0 ? r2((it.onHand * it.avgCost + q * l.price) / (it.onHand + q)) : l.price;
       it.onHand += q; it.lastCost = l.price; l.received += q;
       invTxn(date, l.sku, 'PO Receipt', q, l.price, poId);
     }
@@ -309,8 +316,12 @@
     const p = need(po(poId), 'Purchase order'); if (!isDate(date)) fail('Enter a valid invoice date.');
     number = String(number || '').trim(); if (!number) fail("Enter the supplier's invoice number.");
     if (S.apInvoices.some((i) => i.supplierId === p.supplierId && i.number === number && i.status !== 'Cancelled')) fail(`Invoice ${number} from this supplier is already entered (duplicate check).`);
+    assertOpen(date);
+    (lines || []).forEach((l) => { if (+l.qty > 0 && !p.lines[+l.line]) fail(`${poId} has no line ${+l.line + 1}.`); if (+l.qty > 0 && (!Number.isInteger(+l.qty) || !(+l.price > 0) || !Number.isFinite(+l.price))) fail('Billed quantities must be whole numbers and prices greater than zero.'); });
     lines = (lines || []).filter((l) => +l.qty > 0).map((l) => ({ line: +l.line, sku: p.lines[+l.line].sku, qty: +l.qty, price: r2(+l.price), poPrice: p.lines[+l.line].price }));
     if (!lines.length) fail('Bill at least one line.');
+    const dupLine = lines.find((l, i) => lines.findIndex((x) => x.line === l.line) !== i);
+    if (dupLine) fail(`PO line ${dupLine.line + 1} (${dupLine.sku}) appears twice. Bill each PO line once.`);
     const holds = [];
     for (const l of lines) {
       const pl = p.lines[l.line];
@@ -351,6 +362,8 @@
   }
   /** payInvoices(ids[], date, method) — one payment per supplier */
   function payInvoices(ids, date, method = 'ACH') {
+    ids = [...new Set(ids)]; if (!ids.length) fail('Select at least one invoice.');
+    assertOpen(date);
     const invs = ids.map((id) => need(apinv(id), `Invoice ${id}`));
     invs.forEach((i) => { if (i.status !== 'Validated') fail(`${i.id} is ${i.status} and cannot be paid.`); });
     const total = sum(invs, (i) => i.total - i.paid);
@@ -374,9 +387,10 @@
   /** createSO({customerId, date, lines:[{sku, qty, price}], poNumber}) — credit check */
   function createSO({ customerId, date, lines, poNumber = '' }) {
     const c = need(cust(customerId), 'Customer'); if (!isDate(date)) fail('Enter a valid order date.');
-    lines = (lines || []).filter((l) => l.sku && +l.qty > 0).map((l) => ({ sku: l.sku, qty: +l.qty, price: r2(+l.price || item(l.sku)?.price) }));
+    lines = (lines || []).filter((l) => l.sku && +l.qty > 0).map((l) => ({ sku: l.sku, qty: +l.qty, price: (l.price === '' || l.price == null) ? r2(item(l.sku)?.price) : r2(+l.price) }));
     if (!lines.length) fail('Add at least one item with a quantity.');
-    lines.forEach((l) => { need(item(l.sku), `Item ${l.sku}`); if (!Number.isInteger(l.qty)) fail('Quantities must be whole numbers.'); });
+    lines.forEach((l) => { need(item(l.sku), `Item ${l.sku}`); if (!Number.isInteger(l.qty)) fail('Quantities must be whole numbers.'); if (!(l.price > 0) || !Number.isFinite(l.price)) fail(`Enter a price greater than zero for ${l.sku}.`); });
+    const seen = new Set(); for (const l of lines) { if (seen.has(l.sku)) fail(`${l.sku} is on the order twice. Combine it into one line.`); seen.add(l.sku); }
     const total = sum(lines, (l) => l.qty * l.price);
     const exposure = r2(openAR(c.id) + openOrders(c.id) + total);
     const o = { id: nextId('SO'), customerId: c.id, date, poNumber, lines, total, status: exposure > c.creditLimit ? 'Credit Hold' : 'Booked', exposure };
@@ -390,7 +404,9 @@
     const o = need(so(id), 'Sales order');
     if (o.status === 'Credit Hold') fail(`${id} is on credit hold. A Controller must release it before shipping.`);
     if (o.status !== 'Booked') fail(`${id} is ${o.status} and cannot be shipped.`);
-    const short = o.lines.filter((l) => item(l.sku).onHand < l.qty);
+    assertOpen(date);
+    const need2 = {}; o.lines.forEach((l) => (need2[l.sku] = (need2[l.sku] || 0) + l.qty));
+    const short = o.lines.filter((l) => item(l.sku).onHand < need2[l.sku]);
     if (short.length) fail('Not enough stock: ' + short.map((l) => `${l.sku} needs ${l.qty}, ${item(l.sku).onHand} on hand`).join('; ') + '. Receive a purchase order first.');
     let cogs = 0;
     o.lines.forEach((l) => { l.unitCost = item(l.sku).avgCost; cogs += l.qty * l.unitCost; });
@@ -408,7 +424,7 @@
     const inv = need(arinv(invoiceId), 'Invoice'); amount = r2(+amount);
     if (inv.status === 'Paid') fail(`${invoiceId} is already paid.`);
     const open = r2(inv.total - inv.paid);
-    if (!(amount > 0)) fail('Enter a receipt amount greater than zero.');
+    if (!(amount > 0) || !Number.isFinite(amount)) fail('Enter a receipt amount greater than zero.');
     if (amount > open + 0.001) fail(`Receipt ${money(amount)} is more than the open balance ${money(open)}.`);
     const c = cust(inv.customerId);
     const j = createJournal({ date, source: 'Receivables', desc: `Receipt from ${c.name} on ${invoiceId}${reference ? ' ref ' + reference : ''}`, ref: invoiceId, lines: [{ acct: '1000', dr: amount }, { acct: '1100', cr: amount }] });
@@ -443,6 +459,7 @@
     const e = need(emp(id), 'Employee'); if (e.status !== 'Active') fail(`${e.name} is not active.`); if (!isDate(date)) fail('Enter a valid termination date.');
     const reports = S.employees.filter((x) => x.managerId === id && x.status === 'Active');
     reports.forEach((r) => (r.managerId = e.managerId)); // reassign reports upward
+    S.absences.filter((a) => a.status === 'Pending' && a.approverId === id).forEach((a) => (a.approverId = e.managerId));
     e.status = 'Terminated'; e.termDate = date; log('Terminated employee', id, `${e.name}; ${reports.length} report(s) moved to ${emp(e.managerId)?.name || 'no manager'}`); return e;
   }
   function requestAbsence({ empId, type, start, end, note = '' }) {

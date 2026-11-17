@@ -8,6 +8,7 @@
   'use strict';
   const App = window.App, E = App.E, U = App.U;
   const esc = App.esc, fmt = App.fmt, fdate = App.fdate, pill = App.pill;
+  const fd = (d) => `<span style="white-space:nowrap">${fdate(d)}</span>`; // date in a table cell
   const TYPES = ['Asset', 'Liability', 'Equity', 'Revenue', 'Expense'];
   const TYPE_PLURAL = { Asset: 'Assets', Liability: 'Liabilities', Equity: 'Equity', Revenue: 'Revenue', Expense: 'Expenses' };
   const card = (title, inner, right = '') => `<div class="card">${title ? `<div class="card-h"><span>${title}</span>${right}</div>` : ''}${inner}</div>`;
@@ -45,7 +46,7 @@
       const filtered = f.period || f.source || f.status;
       const tbl = App.table([
         { h: 'Journal', f: (j) => App.link('je', j.id) },
-        { h: 'Date', f: (j) => fdate(j.date) },
+        { h: 'Date', f: (j) => fd(j.date) },
         { h: 'Period', f: (j) => U.periodLabel(j.period) },
         { h: 'Source', f: (j) => esc(j.source) },
         { h: 'Description', f: (j) => esc(j.desc) },
@@ -319,8 +320,8 @@
           { h: 'Supplier', f: (i) => App.link('sup', i.supplierId, E.sup(i.supplierId)?.name) },
           { h: 'Supplier no.', f: (i) => `<span class="mono">${esc(i.number)}</span>` },
           { h: 'PO', f: (i) => App.link('po', i.poId) },
-          { h: 'Date', f: (i) => fdate(i.date) },
-          { h: 'Due', f: (i) => fdate(i.due) + (i.status === 'Validated' && i.due < today ? ' <span class="pill bad">Past due</span>' : '') },
+          { h: 'Date', f: (i) => fd(i.date) },
+          { h: 'Due', f: (i) => fd(i.due) + (i.status === 'Validated' && i.due < today ? ' <span class="pill bad">Past due</span>' : '') },
           { h: 'Amount', num: true, f: (i) => fmt(i.total) },
           { h: 'Status', f: (i) => pill(i.status) + (i.status === 'On Hold' && i.holds?.length ? `<div class="small muted" style="max-width:320px;white-space:normal">${esc(i.holds[0])}${i.holds.length > 1 ? ` (+${i.holds.length - 1} more)` : ''}</div>` : '') },
           { h: '', f: (i) => i.status === 'Validated' ? App.btn('Pay', 'ap-pay', { id: i.id }, 'ap.pay', 'sm') : i.status === 'On Hold' ? App.btn('Release', 'ap-release', { id: i.id }, 'ap.release', 'sm') : '' },
@@ -328,7 +329,7 @@
       } else if (tab === 'pay') {
         body = card('', App.table([
           { h: 'Payment', f: (p) => App.link('pay', p.id) },
-          { h: 'Date', f: (p) => fdate(p.date) },
+          { h: 'Date', f: (p) => fd(p.date) },
           { h: 'Supplier', f: (p) => App.link('sup', p.supplierId, E.sup(p.supplierId)?.name) },
           { h: 'Method', f: (p) => esc(p.method) },
           { h: 'Invoices', f: (p) => p.invoices.map((id) => App.link('apinv', id)).join(', ') },
@@ -388,8 +389,8 @@
           { h: 'Invoice', f: (i) => App.link('arinv', i.id) },
           { h: 'Customer', f: (i) => App.link('cust', i.customerId, E.cust(i.customerId)?.name) },
           { h: 'Sales order', f: (i) => App.link('so', i.soId) },
-          { h: 'Date', f: (i) => fdate(i.date) },
-          { h: 'Due', f: (i) => fdate(i.due) + (isLate(i) ? ` <span class="small muted">${U.daysBetween(i.due, today)} days late</span>` : '') },
+          { h: 'Date', f: (i) => fd(i.date) },
+          { h: 'Due', f: (i) => fd(i.due) + (isLate(i) ? ` <span class="small muted">${U.daysBetween(i.due, today)} days late</span>` : '') },
           { h: 'Amount', num: true, f: (i) => fmt(i.total) },
           { h: 'Open', num: true, f: (i) => fmt(i.total - i.paid) },
           { h: 'Status', f: (i) => pill(isLate(i) ? 'Overdue' : i.status) },
@@ -405,7 +406,7 @@
       } else if (tab === 'rc') {
         body = card('', App.table([
           { h: 'Receipt', f: (r) => `<span class="mono">${esc(r.id)}</span>` },
-          { h: 'Date', f: (r) => fdate(r.date) },
+          { h: 'Date', f: (r) => fd(r.date) },
           { h: 'Customer', f: (r) => App.link('cust', r.customerId, E.cust(r.customerId)?.name) },
           { h: 'Invoice', f: (r) => App.link('arinv', r.invoiceId) },
           { h: 'Reference', f: (r) => esc(r.reference) || '<span class="muted">None</span>' },

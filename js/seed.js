@@ -142,7 +142,7 @@
     E.requestAbsence({ empId: S.employees.find((e) => e.name === 'Kwame Asante').id, type: 'Sick', start: '2026-11-17', end: '2026-11-18', note: '' });
 
     // Close Jul-Sep
-    at('2026-10-08'); asRole('Controller', 'Avery Lin', () => { E.closePeriod('2026-07'); E.closePeriod('2026-08'); E.closePeriod('2026-09'); });
+    at('2026-11-17'); asRole('Controller', 'Avery Lin', () => { E.closePeriod('2026-07'); E.closePeriod('2026-08'); E.closePeriod('2026-09'); });
     delete S._clock; delete S._date;
     S.role = 'Administrator'; S.user = 'System Administrator';
     return S;

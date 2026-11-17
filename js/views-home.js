@@ -23,7 +23,17 @@
     return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * p;
   };
   const timeOf = (ts) => { const t = String(ts || ''); return t.length >= 16 ? t.slice(11, 16) : ''; };
-  const auditSorted = () => E.S.audit.map((a, i) => ({ a, i })).sort((x, y) => String(y.a.ts).localeCompare(String(x.a.ts)) || x.i - y.i).map((x) => x.a);
+  // S.audit is newest-first by insertion; order by business date, then insertion (seed closes Jul-Sep last but dated Oct).
+  const auditSorted = () => E.S.audit.map((a, i) => ({ a, i })).sort((x, y) => String(y.a.date).localeCompare(String(x.a.date)) || x.i - y.i).map((x) => x.a);
+  /** App.refLink plus the document kinds it does not recognise (requisitions, absences, employees). */
+  const refLink = (ref) => {
+    const r = String(ref || '');
+    if (/^REQ-\d+$/.test(r) && E.req(r)) return App.link('req', r);
+    if (/^ABS-\d+$/.test(r) && E.S.absences.some((a) => a.id === r)) return App.link('abs', r);
+    if (/^E-\d+$/.test(r) && E.emp(r)) return App.link('emp', r);
+    return App.refLink(r);
+  };
+  const when = (a) => `<span class="mono small" style="white-space:nowrap">${esc(fdate(a.date))}${timeOf(a.ts) ? ' ' + esc(timeOf(a.ts)) : ''}</span>`;
   const KIND_LABEL = { req: 'Requisitions', je: 'Journals', apinv: 'Invoice holds', so: 'Credit holds', abs: 'Absence requests' };
   const KIND_ORDER = ['req', 'je', 'apinv', 'so', 'abs'];
 
@@ -113,9 +123,11 @@
       tip.hidden = false;
       const wr = wrap.getBoundingClientRect(), gr = g.querySelector('.hc-hit').getBoundingClientRect();
       const tw = tip.offsetWidth, th = tip.offsetHeight;
-      let left = gr.left - wr.left + gr.width / 2 - tw / 2;
+      // sit beside the hovered month so the tooltip never covers its own bars
+      let left = gr.right - wr.left - gr.width * 0.12;
+      if (left + tw > wr.width) left = gr.left - wr.left + gr.width * 0.12 - tw;
       left = Math.max(0, Math.min(wr.width - tw, left));
-      tip.style.left = left + 'px'; tip.style.top = Math.max(0, 8 - th / 4) + 'px';
+      tip.style.left = left + 'px'; tip.style.top = Math.max(0, Math.min(wr.height - th, 24)) + 'px';
     };
     wrap.addEventListener('mouseover', (ev) => { const g = ev.target.closest('.hc-grp'); if (g) show(g); });
     wrap.addEventListener('mouseleave', hide);
@@ -142,7 +154,7 @@
         `Signed in as ${esc(S.role)}. Today is ${esc(fdate(S.today))}. Open periods: ${esc(App.openPeriods().map(U.periodLabel).join(', ') || 'none')}.`,
         App.btn('Approvals inbox', 'go', { view: 'approvals' }));
 
-      const kpis = `<div class="kpis">`
+      const kpis = `<div class="kpis" style="grid-template-columns:repeat(auto-fit,minmax(148px,1fr))">`
         + App.kpi('Cash', App.fmt0(cash), 'GL 1000 operating account')
         + App.kpi('Receivables', App.fmt0(ar), `GL 1100, ${E.S.arInvoices.filter((i) => i.status !== 'Paid').length} open invoices`)
         + App.kpi('Payables', App.fmt0(ap), `GL 2000, ${E.S.apInvoices.filter((i) => i.status === 'Validated').length} invoices to pay`)
@@ -190,10 +202,10 @@
       const recent = auditSorted().slice(0, 8);
       const activity = `<section class="card"><div class="card-h"><span>Recent activity</span>${App.btn('Full audit trail', 'go', { view: 'audit' }, null, 'sm')}</div>
         ${App.table([
-          { h: 'When', f: (a) => `<span class="mono small">${esc(fdate(a.date))}${timeOf(a.ts) ? ' ' + esc(timeOf(a.ts)) : ''}</span>` },
+          { h: 'When', f: when },
           { h: 'User', f: (a) => esc(a.user) },
           { h: 'Action', f: (a) => esc(a.action) },
-          { h: 'Reference', f: (a) => App.refLink(a.ref) },
+          { h: 'Reference', f: (a) => refLink(a.ref) },
         ], recent, { empty: 'No activity recorded yet.' })}</section>`;
 
       return head + kpis
@@ -242,11 +254,11 @@
     const rows = auditRows(), all = E.S.audit.length, shown = rows.slice(0, 500);
     return `<div class="pad small muted" style="padding-bottom:0">${rows.length === all ? `${App.num(all)} entries` : `${App.num(rows.length)} of ${App.num(all)} entries match`}${rows.length > shown.length ? `, showing the latest ${shown.length}` : ''}.</div>`
       + App.table([
-        { h: 'Timestamp', f: (a) => `<span class="mono small" style="white-space:nowrap">${esc(fdate(a.date))}${timeOf(a.ts) ? ' ' + esc(timeOf(a.ts)) : ''}</span>` },
+        { h: 'Timestamp', f: when },
         { h: 'User', f: (a) => esc(a.user) },
         { h: 'Role', f: (a) => `<span class="muted">${esc(a.role)}</span>` },
         { h: 'Action', f: (a) => esc(a.action) },
-        { h: 'Reference', f: (a) => App.refLink(a.ref) },
+        { h: 'Reference', f: (a) => refLink(a.ref) },
         { h: 'Detail', f: (a) => `<span class="small">${esc(a.detail)}</span>` },
       ], shown, { empty: 'No entries match these filters.' });
   }

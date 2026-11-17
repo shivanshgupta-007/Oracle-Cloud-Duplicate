@@ -173,7 +173,7 @@
   App.journalLines = journalLines;
   const refLink = (ref) => {
     if (!ref) return '<span class="muted">None</span>';
-    const k = ref.startsWith('PO-') ? 'po' : ref.startsWith('SO-') ? 'so' : ref.startsWith('APINV-') ? 'apinv' : ref.startsWith('ARINV-') ? 'arinv' : ref.startsWith('PR-') ? 'payrun' : ref.startsWith('PAY-') ? 'pay' : ref.startsWith('JE-') ? 'je' : E.item(ref) ? 'item' : null;
+    const k = ref.startsWith('PO-') ? 'po' : ref.startsWith('SO-') ? 'so' : ref.startsWith('APINV-') ? 'apinv' : ref.startsWith('ARINV-') ? 'arinv' : ref.startsWith('PR-') ? 'payrun' : ref.startsWith('PAY-') ? 'pay' : ref.startsWith('JE-') ? 'je' : ref.startsWith('REQ-') ? 'req' : ref.startsWith('ABS-') ? 'abs' : /^E-\d+$/.test(ref) ? 'emp' : ref.startsWith('SUP-') ? 'sup' : ref.startsWith('CUS-') ? 'cust' : E.item(ref) ? 'item' : null;
     return k ? App.link(k, ref) : esc(ref);
   };
   App.refLink = refLink;
