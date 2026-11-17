@@ -4,6 +4,11 @@
  *   'FY27 Forecast' editable working forecast: actuals for elapsed months, plan for the rest
  * Amounts are stored in each account's natural sign (revenue and expense both positive):
  *   S.budgets[version][acct][period] = amount
+ * Department layer (optional): S.deptBudgets[version][dept][acct][period] for operating expense accounts
+ * (6000+) and '1200' (inventory purchases committed by requisitions). Seeded by splitting the company
+ * budget: wages and payroll taxes by salary share, other opex by headcount, purchases to Operations.
+ * Budgetary control: E.createReq is wrapped; a requisition that exceeds the requester's department
+ * purchasing budget for its period gets req.budgetWarning (advisory, never blocks).
  * No GL effect: plans never post journals.
  */
 (function (root) {
@@ -30,20 +35,81 @@
     st.budgetVersions = st.budgetVersions || {};
     if (!st.budgetVersions[BUDGET]) st.budgetVersions[BUDGET] = { name: BUDGET, status: 'Approved', locked: true, desc: 'Board-approved annual operating budget' };
     if (!st.budgetVersions[FORECAST]) st.budgetVersions[FORECAST] = { name: FORECAST, status: 'Working', locked: false, desc: 'Rolling forecast: actuals for elapsed months, plan for the remainder' };
+    st.deptBudgets = st.deptBudgets || {};
+    VERSIONS.forEach((v) => { st.deptBudgets[v] = st.deptBudgets[v] || {}; });
   });
+  const PURCHASES = '1200';
 
   // ---------- reads ----------
   /** Fiscal periods Jul-26..Jun-27 in order. */
   const planPeriods = () => Object.keys(S().periods).sort();
   /** Accounts that carry a plan: every active revenue and expense account. */
-  const planAccounts = () => S().accounts.filter((a) => PLAN_TYPES.includes(a.type) && a.active !== false);
+  const planAccounts = () => S().accounts.filter((a) => PLAN_TYPES.includes(a.type) && a.active !== false && !a.ic);
   /** Months whose last day is before today: their actuals are complete enough to replace the plan. */
   const elapsedPeriods = () => planPeriods().filter((p) => periodEnd(p) < S().today);
   const version = (v) => S().budgetVersions[v] || fail(`Plan version ${v} was not found.`);
   const budgetAmount = (v, code, p) => +((S().budgets[v] || {})[code]?.[p] || 0);
   const rowTotal = (v, code, periods) => r2((periods || planPeriods()).reduce((a, p) => a + budgetAmount(v, code, p), 0));
-  /** Actual for an account in natural sign over a period range. */
-  const actual = (code, fromPeriod, toPeriod) => E.natural(code, E.balance(code, { fromPeriod, toPeriod: toPeriod || fromPeriod }));
+  /** Actual for an account in natural sign over a period range; opts {dept, entity} filter the ledger. */
+  const actual = (code, fromPeriod, toPeriod, opts) => E.natural(code, E.balance(code, { fromPeriod, toPeriod: toPeriod || fromPeriod, ...(opts && opts.dept ? { dept: opts.dept } : {}), ...(opts && opts.entity ? { entity: opts.entity } : {}) }));
+  // ---------- department layer ----------
+  const UNASSIGNED = E.UNASSIGNED || 'Unassigned';
+  /** Accounts budgeted by department: operating expenses (6000+) and 1200 purchases. */
+  const deptAccounts = () => planAccounts().filter((a) => a.type === 'Expense' && a.code >= '6000');
+  const planDepts = () => [...S().departments];
+  const deptBudgetAmount = (v, dept, code, p) => +(((S().deptBudgets[v] || {})[dept] || {})[code]?.[p] || 0);
+  const deptRowTotal = (v, dept, code, periods) => r2((periods || planPeriods()).reduce((a, p) => a + deptBudgetAmount(v, dept, code, p), 0));
+  function putDept(v, dept, code, p, amt) { const b = (S().deptBudgets[v] = S().deptBudgets[v] || {}); const d = (b[dept] = b[dept] || {}); (d[code] = d[code] || {})[p] = amt; }
+  /** Weights per department: 'salary' (annual salary of active staff) or 'headcount'. */
+  function deptWeights(kind) {
+    const act = S().employees.filter((e) => e.status === 'Active');
+    return planDepts().map((d) => act.filter((e) => e.dept === d).reduce((a, e) => a + (kind === 'salary' ? e.salary : 1), 0));
+  }
+  /** Splits allocates total across weights; the last share takes the rounding so the split sums exactly. */
+  function allocate(total, weights) {
+    const W = weights.reduce((a, b) => a + b, 0); let acc = 0;
+    return weights.map((w, i) => { if (i === weights.length - 1) return r2(total - acc); const x = W ? r2(total * w / W) : 0; acc = r2(acc + x); return x; });
+  }
+  /** (Re)builds a version's department layer from its company amounts. */
+  function splitDeptBudgets(v) {
+    const ds = planDepts(); const sal = deptWeights('salary'), hc = deptWeights('headcount');
+    S().deptBudgets[v] = {};
+    deptAccounts().forEach((a) => planPeriods().forEach((p) => {
+      const amt = budgetAmount(v, a.code, p); if (!amt) return;
+      allocate(amt, ['6000', '6050'].includes(a.code) ? sal : hc).forEach((x, i) => { if (x) putDept(v, ds[i], a.code, p, x); });
+    }));
+    // Purchasing (inventory replenishment) is run by Operations: budget = planned cost of sales.
+    if (ds.includes('Operations')) planPeriods().forEach((p) => { const x = budgetAmount(v, '5000', p); if (x) putDept(v, 'Operations', PURCHASES, p, r2(x)); });
+  }
+  /** Requisition value committed by a department in a period (requisitions not rejected), optionally excluding one. */
+  function deptCommitted(dept, p, exceptId) {
+    const deptOf = (name) => S().employees.find((e) => e.name === name)?.dept;
+    return r2(S().reqs.filter((r) => r.id !== exceptId && r.status !== 'Rejected' && String(r.date).slice(0, 7) === p && deptOf(r.requester) === dept).reduce((a, r) => a + r.total, 0));
+  }
+  /** Purchasing budget position: {dept, period, budget, committed, remaining}. */
+  function purchaseBudgetStatus(dept, p, ver = BUDGET) {
+    const budget = deptBudgetAmount(ver, dept, PURCHASES, p), committed = deptCommitted(dept, p);
+    return { dept, period: p, account: PURCHASES, budget: r2(budget), committed, remaining: r2(budget - committed) };
+  }
+  /** Budget check for a requisition against its requester's department purchasing budget (account 1200).
+   *  -> null when the requester or period is unknown, else {dept, period, budget, committed, remaining, total, over, text}. */
+  function reqBudgetCheck(r, ver = BUDGET) {
+    const e = S().employees.find((x) => x.name === r.requester); const p = String(r.date || '').slice(0, 7);
+    if (!e || !S().periods[p]) return null;
+    const budget = deptBudgetAmount(ver, e.dept, PURCHASES, p), committed = deptCommitted(e.dept, p, r.id), remaining = r2(budget - committed);
+    const over = r.total > remaining + 0.004;
+    const text = !over ? '' : budget <= 0 ? `${e.dept} has no purchasing budget (account ${PURCHASES}) for ${periodLabel(p)}; this request is ${money(r.total)}.`
+      : `${e.dept} purchasing budget for ${periodLabel(p)} is ${money(budget)} with ${money(committed)} already committed; this request (${money(r.total)}) exceeds the remaining ${money(Math.max(0, remaining))} by ${money(r2(r.total - Math.max(0, remaining)))}.`;
+    return { dept: e.dept, period: p, account: PURCHASES, budget: r2(budget), committed, remaining, total: r.total, over, text };
+  }
+  const origCreateReq = E.createReq;
+  /** Wraps the core createReq: same arguments and result, plus an advisory budgetWarning when over budget. */
+  function createReq(args) {
+    const r = origCreateReq(args);
+    const chk = reqBudgetCheck(r);
+    if (chk && chk.over) { r.budgetWarning = chk.text; E.log('Budget check warning', r.id, chk.text); }
+    return r;
+  }
   const isRevenue = (code) => E.acct(code)?.type === 'Revenue';
   /** Totals for a version: {revenue, cogs, opex, expense, net} for the given periods (default full year). */
   function versionTotals(v, periods) {
@@ -65,15 +131,19 @@
 
   /** Budget vs actual for one period and fiscal YTD to that period.
    *  -> {period, version, rows:[{code,name,type,group, period:{actual,budget,variance,pct,favourable}, ytd:{...}}], totals:{revenue,cogs,opex,net} each {period, ytd}} */
-  function budgetVsActual(period, ver = BUDGET) {
+  function budgetVsActual(period, ver = BUDGET, opts = {}) {
     version(ver);
     if (!S().periods[period]) fail(`${period} is not a period in this fiscal year.`);
+    const dept = opts.dept && opts.dept !== 'All' ? opts.dept : '';
+    if (dept && dept !== UNASSIGNED && !S().departments.includes(dept)) fail(`Department ${dept} does not exist.`);
     const ytdP = planPeriods().filter((p) => p <= period);
+    const bud = (code, ps) => (dept ? ps.reduce((a, p) => a + deptBudgetAmount(ver, dept, code, p), 0) : rowTotal(ver, code, ps));
+    const ao = dept ? { dept } : undefined;
     const rows = planAccounts().map((a) => {
       const group = a.type === 'Revenue' ? 'revenue' : a.code < '6000' ? 'cogs' : 'opex';
       return { code: a.code, name: a.name, type: a.type, group,
-        period: variance(a.code, actual(a.code, period), budgetAmount(ver, a.code, period)),
-        ytd: variance(a.code, actual(a.code, ytdP[0], period), rowTotal(ver, a.code, ytdP)) };
+        period: variance(a.code, actual(a.code, period, period, ao), bud(a.code, [period])),
+        ytd: variance(a.code, actual(a.code, ytdP[0], period, ao), bud(a.code, ytdP)) };
     });
     const tot = (g, k) => ({ a: sum(rows.filter((r) => r.group === g), (r) => r[k].actual), b: sum(rows.filter((r) => r.group === g), (r) => r[k].budget) });
     const totals = {};
@@ -87,7 +157,24 @@
         net: variance(null, rv.a - cg.a - ox.a, rv.b - cg.b - ox.b, 'Revenue'),
       };
     });
-    return { period, version: ver, ytdFrom: ytdP[0], rows, totals };
+    return { period, version: ver, dept: dept || 'All', ytdFrom: ytdP[0], rows, totals };
+  }
+  /** Operating expenses by department: [{dept, period:{actual,budget,variance,...}, ytd:{...}}] incl. Unassigned. */
+  function deptBudgetSummary(period, ver = BUDGET) {
+    const ytdP = planPeriods().filter((p) => p <= period); const accts = deptAccounts();
+    return [...planDepts(), UNASSIGNED].map((d) => {
+      const a = (ps) => accts.reduce((x, ac) => x + actual(ac.code, ps[0], ps[ps.length - 1], { dept: d }), 0);
+      const b = (ps) => accts.reduce((x, ac) => x + ps.reduce((y, p) => y + deptBudgetAmount(ver, d, ac.code, p), 0), 0);
+      return { dept: d, period: variance(null, a([period]), b([period]), 'Expense'), ytd: variance(null, a(ytdP), b(ytdP), 'Expense'), purchases: purchaseBudgetStatus(d, period, ver) };
+    });
+  }
+  /** setDeptBudgetCell(version, dept, acct, period, value) — edits the department layer only. */
+  function setDeptBudgetCell(v, dept, code, p, value) {
+    assertEditable(v); if (!planDepts().includes(dept)) fail(`Department ${dept} does not exist.`);
+    const a = String(code) === PURCHASES ? E.acct(PURCHASES) : assertPlanAccount(code); assertPeriod(p);
+    const amt = parseAmount(value, `${dept} ${a.code} ${periodLabel(p)}`);
+    putDept(v, dept, a.code, p, amt); stamp(v); E.log('Updated department plan amount', v, `${dept} ${a.code} ${periodLabel(p)}: ${money(amt)}`);
+    return amt;
   }
 
   /** Full-year outlook: actual for elapsed months + forecast for the remaining months, vs budget. */
@@ -179,6 +266,8 @@
     version(from); assertEditable(to); if (from === to) fail('Choose a different version to copy from.');
     const ps = opts.periods || planPeriods(); ps.forEach(assertPeriod);
     planAccounts().forEach((a) => ps.forEach((p) => put(to, a.code, p, budgetAmount(from, a.code, p))));
+    const src = S().deptBudgets[from] || {};
+    Object.keys(src).forEach((d) => Object.keys(src[d]).forEach((code) => ps.forEach((p) => putDept(to, d, code, p, deptBudgetAmount(from, d, code, p)))));
     stamp(to); E.log('Copied plan version', to, `from ${from}, ${ps.length} month(s)`);
     return ps.length;
   }
@@ -227,7 +316,7 @@
   }
   E.on('seedSetup', (ctx) => {
     ctx.at('2026-07-01');
-    generateBudget();
+    generateBudget(); splitDeptBudgets(BUDGET);
     const meta = S().budgetVersions[BUDGET];
     meta.locked = true; meta.status = 'Approved'; meta.approvedBy = 'Theo Okafor'; meta.approvedOn = '2026-06-24'; meta.updatedBy = 'Avery Lin'; meta.updatedOn = '2026-06-20';
     E.log('Approved and locked plan version', BUDGET, `Revenue ${money(versionTotals(BUDGET).revenue)}`);
@@ -249,6 +338,7 @@
     planAccounts().forEach((a) => planPeriods().forEach((p) => put(FORECAST, a.code, p, el.includes(p) ? r2(actual(a.code, p)) : budgetAmount(BUDGET, a.code, p))));
     // Sales expects the Pinecrest lab build-out to land in Q1: lift Jan-Mar revenue forecast.
     ['2027-01', '2027-02', '2027-03'].forEach((p) => { const x = r2(budgetAmount(FORECAST, '4000', p) * 1.06); put(FORECAST, '4000', p, x); put(FORECAST, '5000', p, r2(x * COGS_RATE)); });
+    splitDeptBudgets(BUDGET); splitDeptBudgets(FORECAST);
     const meta = st.budgetVersions[FORECAST]; meta.updatedBy = 'Avery Lin'; meta.updatedOn = '2026-11-10';
     E.log('Copied actuals into plan', FORECAST, el.map(periodLabel).join(', '));
   };
@@ -267,7 +357,8 @@
   E.extend({
     PLAN_BUDGET: BUDGET, PLAN_FORECAST: FORECAST, PLAN_VERSIONS: VERSIONS,
     planPeriods, planAccounts, elapsedPeriods, budgetAmount, budgetRowTotal: rowTotal, budgetTotals: versionTotals, planActual: actual,
-    budgetVsActual, planOutlook: outlook, revenueSeries, forecastMatchesActual, parseBudgetAmount: parseAmount,
+    budgetVsActual, planOutlook: outlook, createReq, reqBudgetCheck, purchaseBudgetStatus, deptBudgetAmount, deptBudgetRowTotal: deptRowTotal, deptBudgetSummary,
+    splitDeptBudgets, setDeptBudgetCell, planDepts, deptPlanAccounts: deptAccounts, PLAN_PURCHASES: PURCHASES, revenueSeries, forecastMatchesActual, parseBudgetAmount: parseAmount,
     setBudgetCell, setBudgetRow, spreadAnnual, copyVersion, copyActuals, setVersionLock,
   });
 })(typeof window !== 'undefined' ? window : globalThis);

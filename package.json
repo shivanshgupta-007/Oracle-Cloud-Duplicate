@@ -2,6 +2,7 @@
   "name": "ledgerline-suite",
   "private": true,
   "scripts": {
+    "start": "node server/server.js",
     "test": "node --test tests/"
   }
 }

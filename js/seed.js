@@ -27,7 +27,11 @@
      ['6000', 'Salaries and wages', 'Expense'], ['6050', 'Employer payroll taxes', 'Expense'], ['6100', 'Rent', 'Expense'],
      ['6200', 'Utilities', 'Expense'], ['6300', 'Depreciation', 'Expense'], ['6400', 'Software and subscriptions', 'Expense'], ['6500', 'Travel', 'Expense'],
      ['6800', 'Professional and testing services', 'Expense'], ['7100', 'Realized FX gain/loss', 'Expense'],
-    ].forEach(([code, name, type]) => S.accounts.push({ code, name, type, active: true }));
+     // intercompany (eliminated on consolidation)
+     ['1800', 'Intercompany receivable', 'Asset', true], ['1850', 'Investment in subsidiaries', 'Asset', true], ['2800', 'Intercompany payable', 'Liability', true],
+     ['4950', 'Intercompany service income', 'Revenue', true], ['6850', 'Intercompany service charges', 'Expense', true],
+    ].forEach(([code, name, type, ic]) => S.accounts.push({ code, name, type, active: true, ...(ic ? { ic: true } : {}) }));
+    S.accounts.sort((a, b) => a.code.localeCompare(b.code));
 
     ['2026-07', '2026-08', '2026-09', '2026-10', '2026-11'].forEach((p) => (S.periods[p] = 'Open'));
 
@@ -55,6 +59,11 @@
     E.createJournal({ date: '2026-07-01', source: 'Opening', desc: 'Opening balances FY2027', lines: [
       { acct: '1000', dr: 1450000 }, { acct: '1200', dr: openingInv }, { acct: '1500', dr: 240000 }, { acct: '1510', cr: 48000 },
       { acct: '2500', cr: 150000 }, { acct: '3000', cr: 400000 }, { acct: '3100', cr: E.util.r2(1450000 + openingInv + 240000 - 48000 - 150000 - 400000) }] });
+    // US02 Halden Field Services LLC: capitalised by US01 on 1 Jul (investment vs share capital eliminates on consolidation)
+    S._clock = '2026-07-01T09:30:00Z'; S._date = '2026-07-01';
+    E.createJournal({ date: '2026-07-01', source: 'Intercompany', desc: 'Capital injection: US01 subscribes share capital of US02 Halden Field Services LLC', lines: [
+      { acct: '1850', dr: 60000, entity: 'US01', ic: true, partner: 'US02', memo: 'Investment in US02' }, { acct: '1000', cr: 60000, entity: 'US01', memo: 'Transfer to US02' },
+      { acct: '1000', dr: 60000, entity: 'US02', memo: 'Opening bank balance' }, { acct: '3000', cr: 60000, entity: 'US02', ic: true, partner: 'US01', memo: 'Share capital held by US01' }] });
 
     // Workforce
     const H = (name, title, dept, mgr, salary, hireDate) => E.hireEmployee({ name, title, dept, managerId: mgr ? mgr.id : '', salary, hireDate });
@@ -129,12 +138,12 @@
       at(D(p, 1)); rentJE[p] = E.createJournal({ date: D(p, 1), source: 'Payables', desc: `Rent, Fenwick Park unit 4 (${E.util.periodLabel(p)})`, lines: [{ acct: '6100', dr: 14500 }, { acct: '1000', cr: 14500 }] }).id;
       if (!last) {
         at(D(p, 20)); const u = E.util.r2(2100 + rand() * 900); E.createJournal({ date: D(p, 20), source: 'Payables', desc: 'Electricity and water', lines: [{ acct: '6200', dr: u }, { acct: '1000', cr: u }] });
-        at(D(p, 6)); softJE[p] = E.createJournal({ date: D(p, 6), source: 'Payables', desc: 'ERP, CAD and design software licences', lines: [{ acct: '6400', dr: 4850 }, { acct: '1000', cr: 4850 }] }).id;
+        at(D(p, 6)); softJE[p] = E.createJournal({ date: D(p, 6), source: 'Payables', desc: 'ERP, CAD and design software licences', lines: [{ acct: '6400', dr: 4850, dept: 'Engineering' }, { acct: '1000', cr: 4850 }] }).id;
         // remit last month's payroll liabilities
         const liab = -E.balance('2200'); if (liab > 0) { at(D(p, 15)); E.createJournal({ date: D(p, 15), source: 'Payroll', desc: 'Remit payroll taxes to tax authority', lines: [{ acct: '2200', dr: liab }, { acct: '1000', cr: liab }] }); }
         at(E.util.periodEnd(p)); E.runPayroll(p);
         E.runDepreciation(p);
-        at(D(p, 25)); const t = E.util.r2(1800 + rand() * 2600); E.createJournal({ date: D(p, 25), source: 'Payables', desc: 'Sales travel, customer site visits', lines: [{ acct: '6500', dr: t }, { acct: '1000', cr: t }] });
+        at(D(p, 25)); const t = E.util.r2(1800 + rand() * 2600); E.createJournal({ date: D(p, 25), source: 'Payables', desc: 'Sales travel, customer site visits', lines: [{ acct: '6500', dr: t, dept: 'Sales' }, { acct: '1000', cr: t }] });
       }
       // ---------- sales tax, foreign currency, accruals (fixed amounts; no random draws) ----------
       const prev = months[mi - 1];
@@ -146,6 +155,19 @@
       if (prev) { const hi = S.arInvoices.find((i) => i.customerId === harrow.id && E.util.periodOf(i.date) === prev); at2(D(p, 12)); E.applyReceipt({ invoiceId: hi.id, date: D(p, 12), amount: E.fxOpen(hi), reference: `BACS${prev.replace('-', '')}` }); }
       const accr = { '2026-09': ['Accrue September inbound freight not yet billed', 3150], '2026-10': ['Accrue October audit and tax advisory fees', 8500] }[p];
       if (accr) { at2(E.util.periodEnd(p), '16:00'); asRole('Controller', 'Avery Lin', () => E.createManualJournal({ date: E.util.periodEnd(p), desc: accr[0], autoReverse: true, lines: [{ acct: '6800', dr: accr[1] }, { acct: '2400', cr: accr[1] }] })); }
+      // ---------- US02 field services subsidiary (fixed amounts; no random draws) ----------
+      {
+        const k = mi; const asCtl = (fn) => asRole('Controller', 'Avery Lin', fn);
+        const contractor = [8400, 9150, 9800, 8900, 7600][k], fuel = [1180, 1265, 1340, 1210, 940][k], service = [19800, 21400, 23600, 22100, 16300][k];
+        at2(D(p, 5)); asCtl(() => E.createIntercompany({ date: D(p, 5), fromEntity: 'US01', toEntity: 'US02', fromAcct: '1000', toAcct: '6000', toDept: 'Operations', amount: contractor, desc: `Field technician contractors ${E.util.periodLabel(p)}, paid by US01 on behalf of US02` }));
+        at2(D(p, 12)); asCtl(() => E.createIntercompany({ date: D(p, 12), fromEntity: 'US01', toEntity: 'US02', fromAcct: '1000', toAcct: '6500', toDept: 'Operations', amount: fuel, desc: `Service van fuel cards ${E.util.periodLabel(p)}, paid by US01 on behalf of US02` }));
+        at2(D(p, 14)); asCtl(() => E.createIntercompany({ date: D(p, 14), fromEntity: 'US02', toEntity: 'US01', fromAcct: '4950', toAcct: '6850', fromDept: 'Operations', toDept: 'Operations', amount: service, desc: `Installation and on-site calibration services ${E.util.periodLabel(p)}` }));
+        at2(D(p, 14), '11:00'); asCtl(() => E.createIntercompany({ date: D(p, 14), fromEntity: 'US01', toEntity: 'US02', fromAcct: '4950', toAcct: '6850', fromDept: 'Finance', toDept: 'Operations', amount: 2500, desc: `Shared finance, HR and IT support fee ${E.util.periodLabel(p)}` }));
+        if (!last) {
+          at2(D(p, 26)); asCtl(() => { E.settleIntercompany({ date: D(p, 26), payer: 'US01', payee: 'US02', desc: `${E.util.periodLabel(p)} services` }); E.settleIntercompany({ date: D(p, 26), payer: 'US02', payee: 'US01', desc: `${E.util.periodLabel(p)} costs and support fee` }); });
+          at2(D(p, 22)); E.createJournal({ date: D(p, 22), source: 'Payables', desc: 'US02 vehicle insurance and tolls', lines: [{ acct: '6500', dr: 640, entity: 'US02', dept: 'Operations' }, { acct: '1000', cr: 640, entity: 'US02' }] });
+        }
+      }
       E.hooks.seedMonthly.forEach((f) => f(p, ctx));
     });
 

@@ -39,7 +39,7 @@
     ['People', ['workforce', 'absence', 'payroll']],
     ['Administration', ['audit', 'security']],
   ];
-  const ui = { tab: {}, filter: {}, sort: {}, limit: {} }; // per-view UI state (tabs, filters); not persisted in engine state
+  const ui = { tab: {}, filter: {}, sort: {}, limit: {}, entity: 'All' }; // per-view UI state (tabs, filters); not persisted in engine state
 
   const App = {
     E, U, esc, fmt, fmt0, fmtC, num, fdate, pill, ui, $, $$,
@@ -210,11 +210,22 @@
   App.act('open', (ds) => App.open(ds.kind, ds.id));
   const dl = (pairs) => `<div class="dl">${pairs.filter(Boolean).map(([k, v]) => `<div><span>${k}</span>${v}</div>`).join('')}</div>`;
   App.dl = dl;
-  const journalLines = (j) => App.table([
-    { h: 'Account', f: (l) => `${App.link('acct', l.acct)} ${esc(E.acct(l.acct)?.name)}` },
-    { h: 'Memo', f: (l) => esc(l.memo) },
-    { h: 'Debit', num: true, f: (l) => (l.dr ? fmt(l.dr) : '') }, { h: 'Credit', num: true, f: (l) => (l.cr ? fmt(l.cr) : '') },
-  ], j.lines, { foot: ['Total', '', fmt(U.sum(j.lines, (l) => l.dr)), fmt(U.sum(j.lines, (l) => l.cr))] });
+  const journalLines = (j) => {
+    const dims = j.lines.some((l) => l.entity || l.dept || l.ic);
+    const cols = [
+      { h: 'Account', f: (l) => `${App.link('acct', l.acct)} ${esc(E.acct(l.acct)?.name)}` },
+      ...(dims ? [{ h: 'Entity', f: (l) => esc(E.lineEntity(l)) + (l.ic ? ` ${pill('IC ' + (l.partner || ''), 'info')}` : '') }, { h: 'Dept', f: (l) => (l.dept ? esc(l.dept) : '<span class="muted">-</span>') }] : []),
+      { h: 'Memo', f: (l) => esc(l.memo) },
+      { h: 'Debit', num: true, f: (l) => (l.dr ? fmt(l.dr) : '') }, { h: 'Credit', num: true, f: (l) => (l.cr ? fmt(l.cr) : '') },
+    ];
+    return App.table(cols, j.lines, { foot: ['Total', ...(dims ? ['', ''] : []), '', fmt(U.sum(j.lines, (l) => l.dr)), fmt(U.sum(j.lines, (l) => l.cr))] });
+  };
+  /** Options for entity / department selects. */
+  App.entityOptions = (withAll) => [...(withAll ? [['All', 'All entities (consolidated)']] : []), ...E.entities().map((x) => [x.code, `${x.code} ${x.name}`])];
+  App.deptOptions = (blank = 'No department') => [['', blank], ...E.S.departments.map((d) => [d, d])];
+  /** Entity currently chosen in the top bar ('All' = consolidated). */
+  App.entity = () => (ui.entity && ui.entity !== 'All' && E.entity(ui.entity) ? ui.entity : 'All');
+  App.entityLabel = (code) => (code && code !== 'All' ? `${code} ${E.entity(code)?.name || ''}` : 'All entities (consolidated)');
   App.journalLines = journalLines;
   const refLink = (ref) => {
     if (!ref) return '<span class="muted">None</span>';
@@ -275,7 +286,10 @@
 
   App.detail('req', (id) => { const r = E.req(id); if (!r) return null;
     const cur = { 'Pending Approval': 1, Approved: 2, Ordered: 3, Rejected: 1 }[r.status];
-    return { title: `Requisition ${r.id}`, html: stepFlow(['Submitted', 'Approval', 'Approved', 'Ordered'], cur) + dl([['Status', pill(r.status)], ['Date', fdate(r.date)], ['Requester', esc(r.requester)], ['Total', `<span class="num">${fmt(r.total)}</span>`], ['Purchase order', r.poId ? App.link('po', r.poId) : '<span class="muted">Not ordered</span>'], r.approvedBy && ['Approved by', esc(r.approvedBy)]]) + (r.justification ? `<p>${esc(r.justification)}</p>` : '')
+    const chk = E.reqBudgetCheck ? E.reqBudgetCheck(r) : null;
+    const budget = r.budgetWarning ? `<div class="callout warn">Budget check (advisory): ${esc(r.budgetWarning)}</div>`
+      : chk ? `<div class="callout good">Within the ${esc(chk.dept)} purchasing budget for ${esc(U.periodLabel(chk.period))}: ${fmt(chk.remaining)} remaining of ${fmt(chk.budget)}.</div>` : '';
+    return { title: `Requisition ${r.id}`, html: stepFlow(['Submitted', 'Approval', 'Approved', 'Ordered'], cur) + budget + dl([['Status', pill(r.status)], ['Date', fdate(r.date)], ['Requester', esc(r.requester)], ['Total', `<span class="num">${fmt(r.total)}</span>`], ['Purchase order', r.poId ? App.link('po', r.poId) : '<span class="muted">Not ordered</span>'], r.approvedBy && ['Approved by', esc(r.approvedBy)]]) + (r.justification ? `<p>${esc(r.justification)}</p>` : '')
       + App.table([{ h: 'Item', f: (l) => App.link('item', l.sku) + ' ' + esc(E.item(l.sku)?.name) }, { h: 'Qty', num: true, f: (l) => num(l.qty) }, { h: 'Est. price', num: true, f: (l) => fmt(l.price) }, { h: 'Amount', num: true, f: (l) => fmt(l.qty * l.price) }], r.lines),
       buttons: r.status === 'Pending Approval' ? App.btn('Reject', 'req-reject', { id }, 'req.approve', 'danger') + App.btn('Approve', 'req-approve', { id }, 'req.approve', 'primary') : '' };
   });
@@ -488,6 +502,7 @@
   function render() {
     const v = views[App.current] || views.home;
     renderNav();
+    const es = $('#entitySel'); if (es && es.value !== App.entity()) es.value = App.entity();
     $('#todayChip').textContent = `Today ${fdate(E.S.today)} · Open: ${App.openPeriods().map(U.periodLabel).join(', ') || 'none'}`;
     const sel = $('#roleSel'); if (sel.value !== E.S.role) sel.value = E.S.role;
     const scroll = window.scrollY;
@@ -533,6 +548,13 @@
   };
   function boot() {
     const sel = $('#roleSel'); sel.innerHTML = Object.keys(E.ROLES).map((r) => `<option>${esc(r)}</option>`).join('');
+    // Entity chip: sets App.ui.entity ('All' = consolidated), the default for Home KPIs and Financial reports.
+    if (!$('#entitySel')) {
+      const lab = document.createElement('label'); lab.className = 'chip'; lab.setAttribute('for', 'entitySel'); lab.title = 'Legal entity shown on Home and in Financial reports';
+      lab.innerHTML = `<select id="entitySel" class="cell-in" style="width:auto;max-width:9.5em;border:0;background:transparent;padding:0 2px" aria-label="Legal entity">${App.entityOptions(true).map(([v, l]) => `<option value="${esc(v)}">${esc(v === 'All' ? 'All entities' : l)}</option>`).join('')}</select>`;
+      sel.closest('label').before(lab);
+      $('#entitySel').addEventListener('change', (ev) => { ui.entity = ev.target.value; if (ui.filter.reports) delete ui.filter.reports.entity; render(); toast(`Showing ${App.entityLabel(App.entity())}.`); });
+    }
     sel.addEventListener('change', () => { E.S.role = sel.value; E.S.user = E.ROLE_USERS[sel.value] || E.S.user; E.log('Switched role', sel.value); save(); render(); toast(`You are now ${E.S.user}, acting as ${sel.value}.`); });
     $('#resetBtn').addEventListener('click', () => App.confirm('Reset demo data', 'Replace everything in this browser with the original demo company? Your changes will be lost.', 'Reset', () => App.storage.reset(), 'Demo data restored.'));
     $('#menuBtn').addEventListener('click', () => $('#rail').classList.toggle('open'));

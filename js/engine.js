@@ -14,7 +14,14 @@
   const WITHHOLDING_RATE = 0.22;         // employee tax withheld
   const EMPLOYER_TAX_RATE = 0.0765;      // employer payroll tax
   const DEPRECIATION_MONTHS = 60;
-  const STATE_VERSION = 2;
+  const STATE_VERSION = 3;
+  const DEFAULT_ENTITY = 'US01';
+  const UNASSIGNED = 'Unassigned';
+  const ENTITIES = [
+    { code: 'US01', name: 'Halden Instruments Inc.', currency: 'USD', primary: true, desc: 'Operating company: products, sales, manufacturing' },
+    { code: 'US02', name: 'Halden Field Services LLC', currency: 'USD', primary: false, desc: 'Installation and on-site calibration subsidiary (USD functional, no translation needed)' },
+  ];
+  const IC_ACCTS = ['1800', '2800'];
   const FUNCTIONAL = 'USD';
   const TAX_CODES = [
     { code: 'MA', name: 'Massachusetts 6.25%', rate: 0.0625 },
@@ -86,21 +93,25 @@
     st.currencies = st.currencies || CURRENCIES.map((x) => ({ ...x }));
     if (!st.fxRates) { st.fxRates = {}; order.forEach((p, i) => { st.fxRates[p] = {}; for (const c in FX_SERIES) st.fxRates[p][c] = FX_SERIES[c][i % 12]; }); }
     st.recurring = st.recurring || []; st.creditMemos = st.creditMemos || []; st.taxRemits = st.taxRemits || [];
+    st.entities = st.entities || ENTITIES.map((x) => ({ ...x })); st.intercompany = st.intercompany || [];
     (st.suppliers || []).forEach((x) => { if (!x.currency) x.currency = FUNCTIONAL; });
     (st.customers || []).forEach((x) => { if (!x.currency) x.currency = FUNCTIONAL; if (x.taxCode == null) x.taxCode = ''; });
-    if ((st.accounts || []).length) CORE_ACCOUNTS.forEach(([code, name, type]) => { if (!st.accounts.some((a) => a.code === code)) { st.accounts.push({ code, name, type, active: true }); st.accounts.sort((a, b) => a.code.localeCompare(b.code)); } });
+    if ((st.accounts || []).length) CORE_ACCOUNTS.forEach(([code, name, type, ic]) => { if (!st.accounts.some((a) => a.code === code)) { st.accounts.push({ code, name, type, active: true, ...(ic ? { ic: true } : {}) }); st.accounts.sort((a, b) => a.code.localeCompare(b.code)); } });
     return st;
   }
-  const CORE_ACCOUNTS = [['2300', 'Sales tax payable', 'Liability'], ['7100', 'Realized FX gain/loss', 'Expense']];
+  const CORE_ACCOUNTS = [['2300', 'Sales tax payable', 'Liability'], ['7100', 'Realized FX gain/loss', 'Expense'],
+    ['1800', 'Intercompany receivable', 'Asset', true], ['1850', 'Investment in subsidiaries', 'Asset', true], ['2800', 'Intercompany payable', 'Liability', true],
+    ['4950', 'Intercompany service income', 'Revenue', true], ['6850', 'Intercompany service charges', 'Expense', true]];
   function applyStateHooks(st) { fillCore(st); hooks.state.forEach((f) => f(st)); return st; }
   function reset() { S = blankState(); Engine.S = S; applyStateHooks(S); return S; }
   function load(obj) { S = obj; Engine.S = S; applyStateHooks(S); return S; }
   /** Bump the ledger revision. Call after ANY change to a journal's lines or status. */
   const touch = () => { S._rev = (S._rev || 0) + 1; };
   /** Add a GL account if missing (no audit entry). For extension setup/state hooks. */
-  function ensureAccount(code, name, type) {
-    if (!S.accounts.some((a) => a.code === code)) { S.accounts.push({ code, name, type, active: true }); S.accounts.sort((a, b) => a.code.localeCompare(b.code)); touch(); }
+  function ensureAccount(code, name, type, extra) {
+    if (!S.accounts.some((a) => a.code === code)) { S.accounts.push({ code, name, type, active: true, ...(extra || {}) }); S.accounts.sort((a, b) => a.code.localeCompare(b.code)); touch(); }
   }
+  const ensureIcAccounts = () => CORE_ACCOUNTS.filter((x) => x[3]).forEach(([c, n, t]) => ensureAccount(c, n, t, { ic: true }));
 
   const nextId = (prefix) => { S.seq[prefix] = (S.seq[prefix] || 1000) + 1; return `${prefix}-${S.seq[prefix]}`; };
   const log = (action, ref, detail) => { S.audit.unshift({ ts: S._clock || new Date().toISOString(), date: S._date || TODAY, user: S.user, role: S.role, action, ref: ref || '', detail: detail || '' }); if (S.audit.length > 2000) S.audit.length = 2000; };
@@ -119,6 +130,13 @@
   const req = (id) => S.reqs.find((x) => x.id === id);
   const payrun = (id) => S.payruns.find((x) => x.id === id);
   const need = (x, what) => x || fail(`${what} was not found.`);
+  /** Legal entities. Journal lines without `entity` belong to DEFAULT_ENTITY (US01). */
+  const entity = (code) => (S.entities || []).find((x) => x.code === code);
+  const entities = () => S.entities || [];
+  const lineEntity = (l) => l.entity || DEFAULT_ENTITY;
+  const lineDept = (l) => l.dept || UNASSIGNED;
+  /** Normalizes an entity filter: '', 'All' or undefined mean every entity. */
+  const entFilter = (x) => (x && x !== 'All' ? x : '');
 
   // ---------- general ledger ----------
   const DEBIT_NORMAL = { Asset: true, Expense: true, Liability: false, Equity: false, Revenue: false };
@@ -144,19 +162,39 @@
   }
 
   /** createJournal({date, source, desc, lines:[{acct, dr, cr, memo}], ref, needsApproval}) */
-  /** Normalizes and validates journal lines (balanced, known accounts). Returns {lines, dr}. */
+  /** Normalizes and validates journal lines (balanced, known accounts). Returns {lines, dr}.
+   *  Optional line dimensions: entity (legal entity code, default US01), dept (department), and for
+   *  intercompany lines ic: true + partner (the other entity). Lines on 1800/2800 are always intercompany.
+   *  Every legal entity in the journal must balance on its own. */
   function checkLines(lines) {
-    lines = (lines || []).map((l) => ({ acct: String(l.acct), dr: r2(+l.dr || 0), cr: r2(+l.cr || 0), memo: l.memo || '' }))
-      .filter((l) => l.dr || l.cr);
+    lines = (lines || []).map((l) => {
+      const o = { acct: String(l.acct), dr: r2(+l.dr || 0), cr: r2(+l.cr || 0), memo: l.memo || '' };
+      const ent = String(l.entity || '').trim(); if (ent) o.entity = ent;
+      const dp = String(l.dept || '').trim(); if (dp && dp !== UNASSIGNED) o.dept = dp;
+      if (l.partner) o.partner = String(l.partner);
+      if (l.ic || IC_ACCTS.includes(o.acct)) o.ic = true;
+      return o;
+    }).filter((l) => l.dr || l.cr);
     if (!lines.length) fail('A journal needs at least one line with an amount.');
     for (const l of lines) {
       if (!acct(l.acct)) fail(`Account ${l.acct} does not exist.`);
       if (!Number.isFinite(l.dr) || !Number.isFinite(l.cr)) fail('Amounts must be valid numbers.');
       if (l.dr < 0 || l.cr < 0) fail('Amounts cannot be negative. Use the opposite column instead.');
       if (l.dr && l.cr) fail('A line can have a debit or a credit, not both.');
+      if (l.entity && !entity(l.entity)) fail(`Legal entity ${l.entity} does not exist.`);
+      if (l.dept && !S.departments.includes(l.dept)) fail(`Department ${l.dept} does not exist.`);
+      if (l.ic) {
+        if (!l.partner) fail(IC_ACCTS.includes(l.acct) ? `Account ${l.acct} ${acct(l.acct).name} holds intercompany balances. Post it with Intercompany so both legal entities are recorded.` : 'An intercompany line needs a partner entity.');
+        if (!entity(l.partner)) fail(`Partner entity ${l.partner} does not exist.`);
+        if (l.partner === lineEntity(l)) fail(`An intercompany line's partner must be a different legal entity than ${l.partner}.`);
+      }
     }
     const dr = sum(lines, (l) => l.dr), cr = sum(lines, (l) => l.cr);
     if (Math.abs(dr - cr) > 0.004) fail(`Journal is out of balance by ${money(r2(dr - cr))}. Debits must equal credits.`);
+    const byEnt = {}; lines.forEach((l) => { const e = lineEntity(l); byEnt[e] = r2((byEnt[e] || 0) + l.dr - l.cr); });
+    for (const e in byEnt) if (Math.abs(byEnt[e]) > 0.004) fail(`Journal is out of balance for legal entity ${e} ${entity(e)?.name || ''} by ${money(byEnt[e])}. Each entity must balance on its own: move amounts between entities through intercompany accounts 1800 / 2800 (Intercompany).`);
+    const icl = lines.filter((l) => l.ic);
+    if (icl.length && Math.abs(sum(icl, (l) => l.dr - l.cr)) > 0.004) fail('The intercompany lines do not offset each other, so they could not be eliminated on consolidation.');
     return { lines, dr };
   }
   function createJournal({ date, source = 'Manual', desc = '', lines = [], ref = '', needsApproval = false }) {
@@ -200,7 +238,7 @@
       const ctrl = controlAccounts(); const hit = j.lines.find((l) => ctrl.has(l.acct));
       if (hit) fail(`${id} posts to control account ${hit.acct} ${acct(hit.acct)?.name || ''}. Reverse it through its subledger (for example a credit memo) so the subledger and GL stay in agreement.`);
     }
-    const r = createJournal({ date, source: j.source, desc: `Reversal of ${j.id}: ${j.desc}`, ref: j.id, lines: j.lines.map((l) => ({ acct: l.acct, dr: l.cr, cr: l.dr, memo: l.memo })) });
+    const r = createJournal({ date, source: j.source, desc: `Reversal of ${j.id}: ${j.desc}`, ref: j.id, lines: j.lines.map((l) => ({ ...l, dr: l.cr, cr: l.dr })) });
     r.reversalOf = j.id; if (opts.auto) r.autoReversal = true; j.reversedBy = r.id;
     log(opts.auto ? 'Auto-reversed accrual' : 'Reversed journal', j.id, `${r.id} dated ${date}`);
     return r;
@@ -261,20 +299,34 @@
   /** Sum of (dr - cr) for posted journals, optionally limited to a period range. */
   // Memoized per (state object, ledger revision, period range): reports and dashboards call this many times per render.
   let balCache = { S: null, rev: -1, m: new Map() };
+  /** balances({fromPeriod, toPeriod, entity, dept, partner, ic}) -> {acct: dr-cr}.
+   *  entity: one legal entity ('All'/'' = every entity). dept: one department ('Unassigned' = lines without one).
+   *  ic: true = only intercompany lines (the elimination set), false = exclude them (consolidated view). */
   function balances(opts = {}) {
     if (balCache.S !== S || balCache.rev !== (S._rev || 0)) balCache = { S, rev: S._rev || 0, m: new Map() };
-    const key = (opts.fromPeriod || '') + '|' + (opts.toPeriod || '');
+    const o = { fromPeriod: opts.fromPeriod || '', toPeriod: opts.toPeriod || '', entity: entFilter(opts.entity), dept: opts.dept || '', partner: opts.partner || '', ic: opts.ic === true ? 1 : opts.ic === false ? 0 : '' };
+    const key = [o.fromPeriod, o.toPeriod, o.entity, o.dept, o.partner, o.ic].join('|');
     let hit = balCache.m.get(key);
-    if (!hit) { hit = computeBalances(opts); balCache.m.set(key, hit); }
+    if (!hit) { hit = computeBalances(o); balCache.m.set(key, hit); }
     return { ...hit };
   }
-  function computeBalances({ fromPeriod, toPeriod } = {}) {
+  function computeBalances({ fromPeriod, toPeriod, entity: ent, dept, partner, ic } = {}) {
     const out = {}; S.accounts.forEach((a) => (out[a.code] = 0));
+    const filtered = ent || dept || partner || ic !== '' && ic != null;
     for (const j of S.journals) {
       if (j.status !== 'Posted') continue;
       if (fromPeriod && j.period < fromPeriod) continue;
       if (toPeriod && j.period > toPeriod) continue;
-      for (const l of j.lines) out[l.acct] = (out[l.acct] || 0) + l.dr - l.cr;
+      for (const l of j.lines) {
+        if (filtered) {
+          if (ent && lineEntity(l) !== ent) continue;
+          if (dept && lineDept(l) !== dept) continue;
+          if (partner && l.partner !== partner) continue;
+          if (ic === 1 && !l.ic) continue;
+          if (ic === 0 && l.ic) continue;
+        }
+        out[l.acct] = (out[l.acct] || 0) + l.dr - l.cr;
+      }
     }
     for (const k in out) out[k] = r2(out[k]);
     return out;
@@ -283,13 +335,18 @@
   /** Converts a dr-cr figure into the account's natural sign. */
   const natural = (code, v) => (DEBIT_NORMAL[acct(code).type] ? v : -v);
 
-  function trialBalance(toPeriod) {
-    const b = balances({ toPeriod });
+  /** Statement filters: {entity, dept}. Without an entity the figures are consolidated: intercompany lines
+   *  (ic: true) are eliminated, unless eliminate: false. A single entity shows its own ledger in full. */
+  const stmtOpts = (opts = {}) => { const ent = entFilter(opts.entity); return { entity: ent, dept: opts.dept || '', ic: ent || opts.eliminate === false ? undefined : false }; };
+  /** trialBalance(toPeriod, {entity, dept}) — every posted line (no eliminations); entity filters one ledger. */
+  function trialBalance(toPeriod, opts = {}) {
+    const b = balances({ toPeriod, entity: opts.entity, dept: opts.dept, ic: opts.eliminate ? false : undefined });
     const rows = S.accounts.map((a) => ({ ...a, dr: b[a.code] > 0 ? b[a.code] : 0, cr: b[a.code] < 0 ? -b[a.code] : 0 })).filter((r) => r.dr || r.cr);
     return { rows, dr: sum(rows, (r) => r.dr), cr: sum(rows, (r) => r.cr) };
   }
-  function incomeStatement(fromPeriod, toPeriod) {
-    const b = balances({ fromPeriod, toPeriod });
+  /** incomeStatement(fromP, toP, {entity, dept, eliminate}) */
+  function incomeStatement(fromPeriod, toPeriod, opts) {
+    const b = balances({ fromPeriod, toPeriod, ...stmtOpts(opts) });
     const pick = (pred) => S.accounts.filter(pred).map((a) => ({ code: a.code, name: a.name, amount: natural(a.code, b[a.code]) })).filter((r) => r.amount);
     const revenue = pick((a) => a.type === 'Revenue');
     const cogs = pick((a) => a.type === 'Expense' && a.code < '6000');
@@ -297,11 +354,13 @@
     const tRev = sum(revenue, (r) => r.amount), tCogs = sum(cogs, (r) => r.amount), tOpex = sum(opex, (r) => r.amount);
     return { revenue, cogs, opex, totalRevenue: tRev, totalCogs: tCogs, grossMargin: r2(tRev - tCogs), totalOpex: tOpex, netIncome: r2(tRev - tCogs - tOpex) };
   }
-  function balanceSheet(toPeriod) {
-    const b = balances({ toPeriod });
+  /** balanceSheet(toP, {entity, eliminate}) — consolidated (eliminated) without an entity. */
+  function balanceSheet(toPeriod, opts = {}) {
+    const so = { ...stmtOpts(opts), dept: '' };
+    const b = balances({ toPeriod, ...so });
     const pick = (t) => S.accounts.filter((a) => a.type === t).map((a) => ({ code: a.code, name: a.name, amount: natural(a.code, b[a.code]) })).filter((r) => r.amount);
     const assets = pick('Asset'), liabilities = pick('Liability'), equity = pick('Equity');
-    const earnings = incomeStatement(FY_START, toPeriod).netIncome;
+    const earnings = incomeStatement(FY_START, toPeriod, { entity: so.entity, eliminate: opts.eliminate }).netIncome;
     const tA = sum(assets, (r) => r.amount), tL = sum(liabilities, (r) => r.amount), tE = r2(sum(equity, (r) => r.amount) + earnings);
     return { assets, liabilities, equity, currentEarnings: earnings, totalAssets: tA, totalLiabilities: tL, totalEquity: tE, balanced: Math.abs(tA - tL - tE) < 0.01 };
   }
@@ -815,17 +874,132 @@
     const slips = staff.map((e) => { const gross = r2(e.salary / 12), tax = r2(gross * WITHHOLDING_RATE), er = r2(gross * EMPLOYER_TAX_RATE); return { empId: e.id, name: e.name, dept: e.dept, gross, tax, net: r2(gross - tax), employerTax: er }; });
     const gross = sum(slips, (s) => s.gross), tax = sum(slips, (s) => s.tax), net = sum(slips, (s) => s.net), er = sum(slips, (s) => s.employerTax);
     const cash = balance('1000'); if (net > cash) fail(`Net pay ${money(net)} exceeds operating cash ${money(cash)}.`);
+    // Expense lines per department (from each slip), so departmental P&L shows its own payroll cost.
+    const order = (d) => { const i = S.departments.indexOf(d); return i < 0 ? 999 : i; };
+    const depts = [...new Set(slips.map((s) => s.dept || ''))].sort((a, b) => order(a) - order(b) || a.localeCompare(b));
+    const dl = [];
+    depts.forEach((d) => { const ss = slips.filter((s) => (s.dept || '') === d); const ex = d ? { dept: d } : {}; dl.push({ acct: '6000', dr: sum(ss, (s) => s.gross), memo: `Gross wages, ${d || UNASSIGNED}`, ...ex }); });
+    depts.forEach((d) => { const ss = slips.filter((s) => (s.dept || '') === d); const ex = d ? { dept: d } : {}; dl.push({ acct: '6050', dr: sum(ss, (s) => s.employerTax), memo: `Employer taxes, ${d || UNASSIGNED}`, ...ex }); });
     const j = createJournal({ date: end, source: 'Payroll', desc: `Payroll ${periodLabel(p)} (${slips.length} employees)`, lines: [
-      { acct: '6000', dr: gross, memo: 'Gross wages' }, { acct: '6050', dr: er, memo: 'Employer taxes' },
-      { acct: '1000', cr: net, memo: 'Net pay' }, { acct: '2200', cr: r2(tax + er), memo: 'Withholding + employer taxes' }] });
+      ...dl, { acct: '1000', cr: net, memo: 'Net pay' }, { acct: '2200', cr: r2(tax + er), memo: 'Withholding + employer taxes' }] });
     const run = { id: nextId('PR'), period: p, date: end, slips, gross, tax, net, employerTax: er, journal: j.id };
     j.ref = run.id; S.payruns.push(run); log('Ran payroll', run.id, `${periodLabel(p)} net ${money(net)}`); return run;
+  }
+
+  // ---------- intercompany ----------
+  const isPL = (code) => { const t = acct(code)?.type; return t === 'Revenue' || t === 'Expense'; };
+  /** Open intercompany position of `from` on `to`: from's 1800 receivable (partner to) and to's 2800 payable (partner from). */
+  function icBalances(from, to) {
+    const receivable = r2(balances({ entity: from, partner: to })['1800'] || 0), payable = r2(-(balances({ entity: to, partner: from })['2800'] || 0));
+    return { from, to, receivable, payable, diff: r2(receivable - payable) };
+  }
+  /** One reconcile row per ordered entity pair: A's IC receivable from B must equal B's IC payable to A. */
+  function icReconcileRows() {
+    const out = []; const es = entities();
+    if (es.length < 2) return out;
+    es.forEach((a) => es.forEach((b) => { if (a.code === b.code) return; const x = icBalances(a.code, b.code); out.push({ name: `Intercompany ${a.code} receivable vs ${b.code} payable`, acct: '1800', sub: x.payable, gl: x.receivable, ic: true }); }));
+    return out;
+  }
+  const icTxn = (id) => S.intercompany.find((x) => x.id === id);
+  /** createIntercompany({date, fromEntity, toEntity, amount, desc, fromAcct='4950', toAcct='6850', fromDept, toDept, memo})
+   *  fromEntity charges toEntity (or pays on its behalf). One journal, balanced per entity:
+   *    fromEntity: Dr 1800 IC receivable / Cr fromAcct      toEntity: Dr toAcct / Cr 2800 IC payable
+   *  When both accounts are revenue/expense the charge is an intercompany recharge: those lines are flagged
+   *  ic: true and eliminated on consolidation. With a balance-sheet fromAcct (e.g. 1000 cash paid on the other
+   *  entity's behalf) only 1800/2800 are eliminated and toAcct is a real cost of toEntity. */
+  function createIntercompany({ date, fromEntity, toEntity, amount, desc = '', fromAcct = '4950', toAcct = '6850', fromDept = '', toDept = '', kind } = {}) {
+    if (!entity(fromEntity)) fail('Choose the legal entity that charges (from).');
+    if (!entity(toEntity)) fail('Choose the legal entity that is charged (to).');
+    if (fromEntity === toEntity) fail('Intercompany needs two different legal entities.');
+    amount = r2(+amount); if (!(amount > 0) || !Number.isFinite(amount)) fail('Enter an amount greater than zero.');
+    if (!String(desc || '').trim()) fail('Describe the intercompany charge.');
+    fromAcct = String(fromAcct); toAcct = String(toAcct);
+    if (!acct(fromAcct) || !acct(toAcct)) fail(`Account ${!acct(fromAcct) ? fromAcct : toAcct} does not exist.`);
+    if ([fromAcct, toAcct].some((c) => IC_ACCTS.includes(c))) fail('Choose the income/expense or cash accounts; 1800 and 2800 are posted automatically.');
+    if (isPL(fromAcct) && !isPL(toAcct)) fail(`${toAcct} ${acct(toAcct).name} is a balance sheet account. A revenue or expense recharge must be charged to a revenue or expense account in ${toEntity}; intercompany profit in assets is not supported.`);
+    if (fromAcct === '1000') { const cash = balances({ entity: fromEntity })['1000'] || 0; if (amount > cash + 0.004) fail(`${fromEntity} has only ${money(cash)} cash to pay on ${toEntity}'s behalf.`); }
+    ensureIcAccounts();
+    const recharge = isPL(fromAcct) && isPL(toAcct);
+    const id = nextId('IC'); desc = String(desc).trim();
+    const fx = recharge ? { ic: true } : {};
+    const lines = [
+      { acct: '1800', dr: amount, entity: fromEntity, partner: toEntity, memo: `Due from ${toEntity}` },
+      { acct: fromAcct, cr: amount, entity: fromEntity, dept: fromDept, ...fx, ...(recharge ? { partner: toEntity } : {}), memo: desc },
+      { acct: toAcct, dr: amount, entity: toEntity, dept: toDept, ...fx, ...(recharge ? { partner: fromEntity } : {}), memo: desc },
+      { acct: '2800', cr: amount, entity: toEntity, partner: fromEntity, memo: `Due to ${fromEntity}` },
+    ];
+    const j = createJournal({ date, source: 'Intercompany', desc: `${id} ${fromEntity} to ${toEntity}: ${desc}`, ref: id, lines });
+    const t = { id, date, kind: kind || (recharge ? 'Recharge' : 'Paid on behalf'), fromEntity, toEntity, amount, desc, fromAcct, toAcct, journal: j.id, createdBy: S.user };
+    S.intercompany.push(t); log('Posted intercompany charge', id, `${fromEntity} to ${toEntity} ${money(amount)}: ${desc}`); return t;
+  }
+  /** settleIntercompany({date, payer, payee, amount?, desc}) — payer pays its IC payable to payee in cash:
+   *  payer Dr 2800 / Cr 1000; payee Dr 1000 / Cr 1800. amount defaults to the full open balance. */
+  function settleIntercompany({ date, payer, payee, amount, desc = '' } = {}) {
+    if (!entity(payer) || !entity(payee) || payer === payee) fail('Choose two different legal entities.');
+    const pos = icBalances(payee, payer);
+    if (!(pos.payable > 0.004)) fail(`${payer} owes nothing to ${payee}.`);
+    amount = amount === '' || amount == null ? pos.payable : r2(+amount);
+    if (!(amount > 0) || !Number.isFinite(amount)) fail('Enter an amount greater than zero.');
+    if (amount > pos.payable + 0.004) fail(`${payer} owes ${payee} only ${money(pos.payable)}.`);
+    const cash = balances({ entity: payer })['1000'] || 0; if (amount > cash + 0.004) fail(`${payer} has only ${money(cash)} cash.`);
+    const id = nextId('IC');
+    const j = createJournal({ date, source: 'Intercompany', desc: `${id} settlement: ${payer} pays ${payee}${desc ? ', ' + desc : ''}`, ref: id, lines: [
+      { acct: '2800', dr: amount, entity: payer, partner: payee, memo: `Settle due to ${payee}` }, { acct: '1000', cr: amount, entity: payer, memo: `Pay ${payee}` },
+      { acct: '1000', dr: amount, entity: payee, memo: `Receive from ${payer}` }, { acct: '1800', cr: amount, entity: payee, partner: payer, memo: `Settle due from ${payer}` }] });
+    const t = { id, date, kind: 'Settlement', fromEntity: payer, toEntity: payee, amount, desc: desc || 'Cash settlement', fromAcct: '1000', toAcct: '1000', journal: j.id, createdBy: S.user };
+    S.intercompany.push(t); log('Settled intercompany balance', id, `${payer} paid ${payee} ${money(amount)}`); return t;
+  }
+
+  // ---------- consolidation and departmental reporting ----------
+  const groupOf = (a) => (a.type === 'Revenue' ? 'revenue' : a.type === 'Expense' ? (a.code < '6000' ? 'cogs' : 'opex') : a.type.toLowerCase());
+  /** consolidation(toPeriod, {fromPeriod}) -> {entities, cols, is:{rows, totals}, bs:{rows, totals}}
+   *  Columns are entity codes, 'elim' and 'cons'; cons = Σ entities + elim exactly (elim = minus the ic lines).
+   *  Values are in natural sign. Income statement covers fromPeriod (default FY start)..toPeriod; balance sheet is as of toPeriod. */
+  function consolidation(toPeriod, opts = {}) {
+    const from = opts.fromPeriod || FY_START;
+    const es = entities().map((e) => e.code); const cols = [...es, 'elim', 'cons'];
+    const isB = {}, bsB = {}, ceB = {};
+    es.forEach((e) => { isB[e] = balances({ fromPeriod: from, toPeriod, entity: e }); bsB[e] = balances({ toPeriod, entity: e }); ceB[e] = balances({ fromPeriod: FY_START, toPeriod, entity: e }); });
+    const neg = (b) => { const o = {}; for (const k in b) o[k] = -b[k]; return o; };
+    isB.elim = neg(balances({ fromPeriod: from, toPeriod, ic: true })); bsB.elim = neg(balances({ toPeriod, ic: true })); ceB.elim = neg(balances({ fromPeriod: FY_START, toPeriod, ic: true }));
+    const row = (a, B) => { const v = {}; let c = 0; [...es, 'elim'].forEach((k) => { v[k] = r2(natural(a.code, B[k][a.code] || 0)); c += v[k]; }); v.cons = r2(c); return { code: a.code, name: a.name, type: a.type, group: groupOf(a), ic: !!a.ic, v }; };
+    const nz = (r) => cols.some((k) => r.v[k]);
+    const isRows = S.accounts.filter((a) => a.type === 'Revenue' || a.type === 'Expense').map((a) => row(a, isB)).filter(nz);
+    const bsRows = S.accounts.filter((a) => ['Asset', 'Liability', 'Equity'].includes(a.type)).map((a) => row(a, bsB)).filter(nz);
+    const tot = (rows, g) => { const o = {}; cols.forEach((k) => (o[k] = sum(rows.filter((r) => r.group === g), (r) => r.v[k]))); return o; };
+    const isT = { revenue: tot(isRows, 'revenue'), cogs: tot(isRows, 'cogs'), opex: tot(isRows, 'opex'), net: {} };
+    cols.forEach((k) => (isT.net[k] = r2(isT.revenue[k] - isT.cogs[k] - isT.opex[k])));
+    const ce = {}; cols.forEach((k) => { if (k === 'cons') return; ce[k] = r2(S.accounts.filter((a) => a.type === 'Revenue' || a.type === 'Expense').reduce((acc, a) => acc - (ceB[k][a.code] || 0), 0)); });
+    ce.cons = r2([...es, 'elim'].reduce((a, k) => a + ce[k], 0));
+    const bsT = { asset: tot(bsRows, 'asset'), liability: tot(bsRows, 'liability'), equity: tot(bsRows, 'equity'), earnings: ce, totalEquity: {}, balanced: {} };
+    cols.forEach((k) => { bsT.totalEquity[k] = r2(bsT.equity[k] + ce[k]); bsT.balanced[k] = Math.abs(bsT.asset[k] - bsT.liability[k] - bsT.totalEquity[k]) < 0.01; });
+    return { entities: es, cols, fromPeriod: from, toPeriod, is: { rows: isRows, totals: isT }, bs: { rows: bsRows, totals: bsT } };
+  }
+  /** Departments that appear in the ledger or the department list, plus 'Unassigned' last. */
+  function deptList() {
+    const seen = new Set(S.departments);
+    S.journals.forEach((j) => j.lines.forEach((l) => { if (l.dept) seen.add(l.dept); }));
+    return [...S.departments, ...[...seen].filter((d) => !S.departments.includes(d)).sort(), UNASSIGNED];
+  }
+  /** deptPL(fromP, toP, {entity}) -> {depts, rows:[{code,name,group, by:{dept:amt}, total}], totals:{dept|'total': {revenue,cogs,opex,net}}}
+   *  Natural-sign P&L per department; lines without a department fall under 'Unassigned'. Consolidated
+   *  (intercompany eliminated) without an entity, so row totals equal incomeStatement(fromP, toP, {entity}). */
+  function deptPL(fromPeriod, toPeriod, opts = {}) {
+    const ent = entFilter(opts.entity); const depts = deptList();
+    const B = {}; depts.forEach((d) => (B[d] = balances({ fromPeriod, toPeriod, entity: ent, dept: d, ic: ent ? undefined : false })));
+    const rows = S.accounts.filter((a) => a.type === 'Revenue' || a.type === 'Expense').map((a) => {
+      const by = {}; depts.forEach((d) => (by[d] = r2(natural(a.code, B[d][a.code] || 0))));
+      return { code: a.code, name: a.name, type: a.type, group: groupOf(a), by, total: sum(depts, (d) => by[d]) };
+    }).filter((r) => depts.some((d) => r.by[d]));
+    const totals = {};
+    [...depts, 'total'].forEach((d) => { const g = (grp) => sum(rows.filter((r) => r.group === grp), (r) => (d === 'total' ? r.total : r.by[d])); const t = { revenue: g('revenue'), cogs: g('cogs'), opex: g('opex') }; t.net = r2(t.revenue - t.cogs - t.opex); totals[d] = t; });
+    return { depts, rows, totals, entity: ent || 'All' };
   }
 
   // ---------- cross-module views ----------
   function approvalsInbox() {
     const out = [];
-    S.reqs.filter((r) => r.status === 'Pending Approval').forEach((r) => out.push({ kind: 'req', id: r.id, title: `Requisition ${money(r.total)}`, who: r.requester, date: r.date, perm: 'req.approve', why: `Over ${money(REQ_APPROVAL_LIMIT)} approval limit` }));
+    S.reqs.filter((r) => r.status === 'Pending Approval').forEach((r) => out.push({ kind: 'req', id: r.id, title: `Requisition ${money(r.total)}`, who: r.requester, date: r.date, perm: 'req.approve', why: `Over ${money(REQ_APPROVAL_LIMIT)} approval limit` + (r.budgetWarning ? `. Budget check: ${r.budgetWarning}` : '') }));
     S.journals.filter((j) => j.status === 'Pending Approval').forEach((j) => out.push({ kind: 'je', id: j.id, title: `Journal ${money(j.total)}: ${j.desc}`, who: j.createdBy, date: j.date, perm: 'gl.approve', why: `Over ${money(JE_APPROVAL_LIMIT)} approval limit` }));
     S.apInvoices.filter((i) => i.status === 'On Hold').forEach((i) => out.push({ kind: 'apinv', id: i.id, title: `Invoice ${i.number} from ${sup(i.supplierId).name}, ${money(i.total)}`, who: 'Payables', date: i.date, perm: 'ap.release', why: i.holds.join('; ') }));
     S.sos.filter((o) => o.status === 'Credit Hold').forEach((o) => out.push({ kind: 'so', id: o.id, title: `Order ${money(o.total)} for ${cust(o.customerId).name}`, who: 'Order management', date: o.date, perm: 'so.release', why: o.hold }));
@@ -899,6 +1073,7 @@
       { name: 'Inventory', acct: '1200', sub: sum(S.items, (i) => i.onHand * i.avgCost), gl: b['1200'] },
       { name: 'Received not invoiced', acct: '2100', sub: sum(S.pos.flatMap((p) => p.lines), (l) => (l.received - l.invoiced) * l.price), gl: -b['2100'] },
     ];
+    rows.push(...icReconcileRows());
     hooks.reconcile.forEach((f) => rows.push(...f(b)));
     return rows.map((r) => ({ ...r, diff: r2(r.sub - r.gl), ok: Math.abs(r.sub - r.gl) < 0.05 }));
   }
@@ -924,7 +1099,7 @@
   }
 
   const Engine = {
-    TODAY, FY_START, STATE_VERSION, FUNCTIONAL, ROLE_USERS, REQ_APPROVAL_LIMIT, JE_APPROVAL_LIMIT, PRICE_TOLERANCE, WITHHOLDING_RATE, EMPLOYER_TAX_RATE, DEPRECIATION_MONTHS, ROLES,
+    TODAY, FY_START, STATE_VERSION, DEFAULT_ENTITY, UNASSIGNED, IC_ACCTS, FUNCTIONAL, ROLE_USERS, REQ_APPROVAL_LIMIT, JE_APPROVAL_LIMIT, PRICE_TOLERANCE, WITHHOLDING_RATE, EMPLOYER_TAX_RATE, DEPRECIATION_MONTHS, ROLES,
     get S() { return S; }, set S(v) { S = v; },
     reset, load, can, log, nextId,
     util: { r2, sum, periodOf, addDays, daysBetween, periodEnd, periodLabel, money, businessDays, isDate },
@@ -942,6 +1117,7 @@
     creditMemo, createARCreditMemo, createAPCreditMemo, salesTaxReport, salesTaxDue, remitSalesTax,
     reverseJournal, processAutoReversals, nextPeriod, recurring, createRecurring, recurringFromJournal, generateRecurring, setRecurringActive,
     hooks, on, addPerms, touch, ensureAccount, need, fail,
+    entity, entities, lineEntity, lineDept, icBalances, icTxn, createIntercompany, settleIntercompany, consolidation, deptPL, deptList,
     /** Add or replace engine functions from an extension module. */
     extend(obj) { Object.keys(obj).forEach((k) => { Engine[k] = obj[k]; }); return Engine; },
   };
