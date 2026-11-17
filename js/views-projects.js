@@ -158,7 +158,7 @@
         { h: 'Amount', num: true, f: (r) => fmt(r.l.amount) }, { h: 'Status', f: (r) => pill(r.x.status) + (r.l.invoiceId ? ` ${App.link('arinv', r.l.invoiceId)}` : r.l.billable ? ' <span class="pill info">Billable</span>' : '') },
       ], exLines, { empty: 'No expenses charged yet.' })
       + `<h3 class="small" style="margin:14px 0 6px">Invoices</h3>` + App.table([
-        { h: 'Invoice', f: (i) => App.link('arinv', i.id) }, { h: 'Date', f: (i) => nowrap(fdate(i.date)) }, { h: 'Due', f: (i) => nowrap(fdate(i.due)) }, { h: 'Amount', num: true, f: (i) => fmt(i.total) }, { h: 'Open', num: true, f: (i) => fmt(i.total - i.paid) }, { h: 'Status', f: (i) => pill(i.status) },
+        { h: 'Invoice', f: (i) => App.link('arinv', i.id) }, { h: 'Date', f: (i) => nowrap(fdate(i.date)) }, { h: 'Due', f: (i) => nowrap(fdate(i.due)) }, { h: 'Amount', num: true, f: (i) => fmt(i.total) }, { h: 'Open', num: true, f: (i) => fmt(E.openAmt(i)) }, { h: 'Status', f: (i) => pill(i.status) },
       ], f.invoices.slice().sort((a, b) => b.date.localeCompare(a.date)), { empty: p.type === 'Internal' ? 'Internal projects are not billed.' : 'Not billed yet.' })
       + `<h3 class="small" style="margin:14px 0 6px">Journals</h3>` + App.jeList(jes.slice(0, 30));
     return { title: `${p.id} ${p.name}`, html, buttons: (p.status === 'Active' ? App.btn('Close project', 'prj-close', { id }, 'prj.edit', 'danger') : '') + billBtn(p, '') };

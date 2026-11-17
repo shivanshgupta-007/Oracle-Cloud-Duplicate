@@ -127,7 +127,7 @@
     }
     const desc = kind === 'returned' ? `Returned customer payment ${rc.reference || rc.id} (${E.cust(rc.customerId).name})` : `Bank ${kind === 'fee' ? 'charges' : kind === 'interest' ? 'interest earned' : 'item'}: ${l.desc}`;
     const j = E.createJournal({ date, source: 'Cash', desc, ref: st.id, lines });
-    if (rc) { rc.returned = true; rc.returnedJournal = j.id; inv.paid = r2(inv.paid - rc.amount); inv.status = inv.paid <= 0 ? 'Open' : 'Partially Paid'; }
+    if (rc) { rc.returned = true; rc.returnedJournal = j.id; inv.paid = r2(inv.paid - (rc.carrying ?? rc.amount)); if (rc.fxAmount) inv.fxPaid = r2((inv.fxPaid || 0) - rc.fxAmount); inv.status = inv.paid <= 0 ? 'Open' : 'Partially Paid'; }
     l.matched = j.id; l.created = j.id; setStatus(st);
     E.log('Created accounting for bank line', st.id, `${l.id} ${money(l.amount)} as ${j.id}`);
     return j;
@@ -188,8 +188,8 @@
     const today = S().today || E.TODAY; const horizon = addDays(today, weeks * 7 - 1);
     const items = [];
     const when = (d) => (d < today ? today : d);
-    S().arInvoices.filter((i) => i.status !== 'Paid' && r2(i.total - i.paid) > 0).forEach((i) => { const d = when(i.due); if (d <= horizon) items.push({ date: d, due: i.due, kind: 'receipt', ref: i.id, desc: `${E.cust(i.customerId)?.name || i.customerId}${i.due < today ? ' (overdue)' : ''}`, amount: r2(i.total - i.paid) }); });
-    S().apInvoices.filter((i) => i.status === 'Validated' && r2(i.total - i.paid) > 0).forEach((i) => { const d = when(i.due); if (d <= horizon) items.push({ date: d, due: i.due, kind: 'payment', ref: i.id, desc: `${E.sup(i.supplierId)?.name || i.supplierId} inv ${i.number}${i.due < today ? ' (overdue)' : ''}`, amount: -r2(i.total - i.paid) }); });
+    S().arInvoices.filter((i) => i.status !== 'Paid' && E.openAmt(i) > 0).forEach((i) => { const d = when(i.due); if (d <= horizon) items.push({ date: d, due: i.due, kind: 'receipt', ref: i.id, desc: `${E.cust(i.customerId)?.name || i.customerId}${i.due < today ? ' (overdue)' : ''}`, amount: E.openAmt(i) }); });
+    S().apInvoices.filter((i) => i.status === 'Validated' && E.openAmt(i) > 0).forEach((i) => { const d = when(i.due); if (d <= horizon) items.push({ date: d, due: i.due, kind: 'payment', ref: i.id, desc: `${E.sup(i.supplierId)?.name || i.supplierId} inv ${i.number}${i.due < today ? ' (overdue)' : ''}`, amount: -E.openAmt(i) }); });
     const netPay = r2(sum(S().employees.filter((e) => e.status === 'Active'), (e) => r2(e.salary / 12)) * (1 - E.WITHHOLDING_RATE));
     const rentJ = S().journals.filter((j) => j.status === 'Posted' && /^Rent/.test(j.desc) && j.lines.some((l) => l.acct === '6100')).sort((p, q) => p.date.localeCompare(q.date)).pop();
     const rent = rentJ ? rentJ.lines.filter((l) => l.acct === '6100').reduce((x, l) => x + l.dr, 0) : 14500;

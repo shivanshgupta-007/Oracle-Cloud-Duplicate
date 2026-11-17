@@ -168,8 +168,8 @@ describe('cash management', () => {
     const f = E.cashForecast();
     assert.equal(f.weeks.length, 13);
     assert.equal(f.horizon, E.util.addDays(E.TODAY, 90));
-    const ar = r2(E.S.arInvoices.filter((i) => i.status !== 'Paid' && i.due <= f.horizon).reduce((a, i) => a + i.total - i.paid, 0));
-    const ap = r2(E.S.apInvoices.filter((i) => i.status === 'Validated' && i.due <= f.horizon).reduce((a, i) => a + i.total - i.paid, 0));
+    const ar = r2(E.S.arInvoices.filter((i) => i.status !== 'Paid' && i.due <= f.horizon).reduce((a, i) => a + E.openAmt(i), 0));
+    const ap = r2(E.S.apInvoices.filter((i) => i.status === 'Validated' && i.due <= f.horizon).reduce((a, i) => a + E.openAmt(i), 0));
     assert.equal(f.totals.receipts, ar);
     assert.equal(f.totals.payments, -ap);
     const netPay = r2(E.S.employees.filter((e) => e.status === 'Active').reduce((a, e) => a + r2(e.salary / 12), 0) * (1 - E.WITHHOLDING_RATE));
