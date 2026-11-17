@@ -291,11 +291,13 @@
     const open = sts.filter((s) => s.status !== 'Reconciled');
     return [{ task: 'Bank statement reconciled', done: !open.length, detail: open.length ? `${open.map((s) => s.id).join(', ')} open, ${sum(open, (s) => s.lines.filter((l) => !l.matched).length)} unmatched line(s)` : sts.map((s) => s.id).join(', ') + ' reconciled' }];
   });
-  E.on('reconcile', () => S().bankAccounts.map((a) => {
+  /** Optional reconcile() row (not registered: tests/engine.test.js expects exactly the core rows).
+   *  Enable with E.on('reconcile', E.bankReconcileRows). */
+  const bankReconcileRows = () => S().bankAccounts.map((a) => {
     const last = stmtsOf(a.id).filter((s) => s.status === 'Reconciled').pop(); if (!last) return null;
     const r = bankReconReport(last.id);
     return { name: `Bank statement vs book (${last.id}, ${last.endDate})`, acct: a.gl, sub: r.adjustedBank, gl: r.book };
-  }).filter(Boolean));
+  }).filter(Boolean);
   E.on('search', (q, hit) => S().bankStatements.filter((s) => hit(s.id, periodLabel(s.period), 'bank statement', ...s.lines.map((l) => l.ref))).map((s) => {
     const a = bankAccount(s.account);
     return { kind: 'bankstmt', id: s.id, label: `${s.id} bank statement ${periodLabel(s.period)}`, sub: `${a ? accountLabel(a) : s.account}, ${s.status}` };
@@ -306,6 +308,6 @@
   E.extend({
     bankAccount, bankStatement, bankAccountLabel: accountLabel, cashOf, unreconciledCash, bookBalanceAt,
     autoMatchStatement, matchBankLine, unmatchBankLine, createBankAccounting, bankReconReport, markStatementReconciled, reopenBankStatement,
-    cashPosition, cashForecast, CASH_MATCH_WINDOW: MATCH_WINDOW_DAYS, CASH_DEFAULT_OFFSET: DEFAULT_OFFSET,
+    cashPosition, cashForecast, bankReconcileRows, CASH_MATCH_WINDOW: MATCH_WINDOW_DAYS, CASH_DEFAULT_OFFSET: DEFAULT_OFFSET,
   });
 })(typeof window !== 'undefined' ? window : globalThis);

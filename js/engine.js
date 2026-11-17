@@ -505,7 +505,7 @@
       if (Math.abs(l.price - pl.price) / pl.price > PRICE_TOLERANCE) holds.push(`${l.sku}: price ${money(l.price)} is more than ${PRICE_TOLERANCE * 100}% off PO price ${money(pl.price)}`);
     }
     const s = sup(p.supplierId);
-    const inv = { id: nextId('APINV'), number, supplierId: s.id, poId, date, due: addDays(date, s.terms), lines, total: sum(lines, (l) => l.qty * l.price), paid: 0, holds, status: holds.length ? 'On Hold' : 'Entered' };
+    const inv = { id: nextId('APINV'), number, supplierId: s.id, poId, date, due: addDays(date, s.terms), lines, total: sum(lines, (l) => l.qty * l.price), paid: 0, credited: 0, currency: FUNCTIONAL, rate: 1, holds, status: holds.length ? 'On Hold' : 'Entered' };
     S.apInvoices.push(inv);
     log(holds.length ? 'Invoice placed on hold' : 'Entered invoice', inv.id, holds.join('; ') || money(inv.total));
     if (!holds.length) validateAP(inv);
@@ -535,57 +535,168 @@
     const inv = need(apinv(id), 'Invoice'); if (inv.status !== 'On Hold') fail('Only invoices on hold can be cancelled. Validated invoices are reversed by a credit memo.');
     inv.status = 'Cancelled'; log('Cancelled invoice', id); return inv;
   }
-  /** payInvoices(ids[], date, method) — one payment per supplier */
+  /** payInvoices(ids[], date, method) — one payment per supplier. Pays each invoice's full open balance.
+   *  Foreign-currency invoices are paid at the payment date's rate; the difference to the carrying
+   *  amount posts to 7100 Realized FX gain/loss. Payment.amount is the USD cash paid. */
   function payInvoices(ids, date, method = 'ACH') {
     ids = [...new Set(ids)]; if (!ids.length) fail('Select at least one invoice.');
     assertOpen(date);
     const invs = ids.map((id) => need(apinv(id), `Invoice ${id}`));
     invs.forEach((i) => { if (i.status !== 'Validated') fail(`${i.id} is ${i.status} and cannot be paid.`); });
-    const total = sum(invs, (i) => i.total - i.paid);
+    const plan = invs.map((i) => { const fx = isFx(i); const rate = fx ? fxRate(i.currency, date) : 1; const carry = openAmt(i); const fxAmt = fxOpen(i); return { i, fx, rate, carry, fxAmt, cash: fx ? r2(fxAmt * rate) : carry }; });
+    if (plan.some((x) => x.fx)) ensureCoreAccounts();
+    const total = sum(plan, (x) => x.cash);
     const cash = balance('1000');
     if (total > cash) fail(`Payment of ${money(total)} exceeds operating cash of ${money(cash)}.`);
-    const bySup = {}; invs.forEach((i) => (bySup[i.supplierId] = bySup[i.supplierId] || []).push(i));
+    const bySup = {}; plan.forEach((x) => (bySup[x.i.supplierId] = bySup[x.i.supplierId] || []).push(x));
     const out = [];
     for (const sid in bySup) {
-      const list = bySup[sid]; const amt = sum(list, (i) => i.total - i.paid);
-      const j = createJournal({ date, source: 'Payables', desc: `Payment to ${sup(sid).name} (${method})`, lines: [{ acct: '2000', dr: amt }, { acct: '1000', cr: amt }] });
-      const pay = { id: nextId('PAY'), supplierId: sid, date, method, amount: amt, invoices: list.map((i) => i.id), journal: j.id };
-      list.forEach((i) => { i.paid = i.total; i.status = 'Paid'; i.paymentId = pay.id; });
+      const list = bySup[sid]; const carry = sum(list, (x) => x.carry), amt = sum(list, (x) => x.cash), fxd = r2(amt - carry);
+      const lines = [{ acct: '2000', dr: carry }, { acct: '1000', cr: amt }];
+      if (fxd > 0) lines.push({ acct: '7100', dr: fxd, memo: 'Realized FX loss' }); if (fxd < 0) lines.push({ acct: '7100', cr: -fxd, memo: 'Realized FX gain' });
+      const j = createJournal({ date, source: 'Payables', desc: `Payment to ${sup(sid).name} (${method})`, lines });
+      const pay = { id: nextId('PAY'), supplierId: sid, date, method, amount: amt, invoices: list.map((x) => x.i.id), journal: j.id };
+      const fxl = list.filter((x) => x.fx); if (fxl.length) { pay.fx = fxl.map((x) => ({ invoiceId: x.i.id, currency: x.i.currency, fxAmount: x.fxAmt, rate: x.rate, carrying: x.carry, cash: x.cash, gainLoss: r2(x.carry - x.cash) })); pay.fxGainLoss = r2(-fxd); }
+      list.forEach((x) => { const i = x.i; i.paid = r2((i.paid || 0) + x.carry); if (x.fx) i.fxPaid = r2((i.fxPaid || 0) + x.fxAmt); i.status = 'Paid'; i.paymentId = pay.id; });
       S.payments.push(pay); j.ref = pay.id; log('Paid supplier', pay.id, `${sup(sid).name} ${money(amt)}`); out.push(pay);
     }
     return out;
   }
 
+  /** Validates the currency/rate pair for a new invoice. Invoices are USD unless `currency` is passed. */
+  function invoiceRate(ccy, rate, date) {
+    ccy = ccy || FUNCTIONAL; if (!currency(ccy)) fail(`Currency ${ccy} is not set up.`);
+    if (ccy === FUNCTIONAL) return { ccy, rate: 1, fx: false };
+    const rt = rate != null && rate !== '' ? +rate : fxRate(ccy, date);
+    if (!(rt > 0) || !Number.isFinite(rt)) fail('Exchange rate must be greater than zero.');
+    return { ccy, rate: rt, fx: true };
+  }
   /** Non-PO supplier invoice (services, utilities, expenses):
-   *  createAPInvoice({supplierId, number, date, lines:[{acct, desc, amount, project?}], source, ref}) -> Validated invoice. */
-  function createAPInvoice({ supplierId, number, date, lines, source = 'Payables', ref = '' }) {
+   *  createAPInvoice({supplierId, number, date, lines:[{acct, desc, amount, project?}], source, ref, currency?, rate?}) -> Validated invoice.
+   *  currency defaults to USD (NOT the supplier's currency). With a foreign currency, line amounts are in that currency;
+   *  the invoice books at rate (default: the period's rate). total / line.amount are USD; fxTotal / line.fxAmount are foreign. */
+  function createAPInvoice({ supplierId, number, date, lines, source = 'Payables', ref = '', currency: ccy, rate }) {
     const s = need(sup(supplierId), 'Supplier'); assertOpen(date);
     number = String(number || '').trim(); if (!number) fail("Enter the supplier's invoice number.");
     if (S.apInvoices.some((i) => i.supplierId === s.id && i.number === number && i.status !== 'Cancelled')) fail(`Invoice ${number} from this supplier is already entered (duplicate check).`);
+    const fx = invoiceRate(ccy, rate, date);
     lines = (lines || []).filter((l) => +l.amount).map((l) => ({ acct: String(l.acct), desc: l.desc || '', amount: r2(+l.amount), project: l.project || '' }));
     if (!lines.length) fail('Add at least one line with an amount.');
     lines.forEach((l) => { if (!acct(l.acct)) fail(`Account ${l.acct} does not exist.`); if (!Number.isFinite(l.amount)) fail('Amounts must be valid numbers.'); });
+    const fxTotal = sum(lines, (l) => l.amount); if (!(fxTotal > 0)) fail('The invoice total must be greater than zero.');
+    if (fx.fx) lines.forEach((l) => { l.fxAmount = l.amount; l.amount = r2(l.amount * fx.rate); });
     const total = sum(lines, (l) => l.amount); if (!(total > 0)) fail('The invoice total must be greater than zero.');
-    const inv = { id: nextId('APINV'), number, supplierId: s.id, poId: '', date, due: addDays(date, s.terms), lines, total, paid: 0, holds: [], status: 'Validated', ref };
-    const j = createJournal({ date, source, desc: `Invoice ${number} (${s.name})`, ref: inv.id, lines: [...lines.map((l) => (l.amount > 0 ? { acct: l.acct, dr: l.amount, memo: l.desc } : { acct: l.acct, cr: -l.amount, memo: l.desc })), { acct: '2000', cr: total, memo: s.name }] });
-    inv.journal = j.id; S.apInvoices.push(inv); log('Entered invoice', inv.id, `${s.name} ${money(total)}`); return inv;
+    const inv = { id: nextId('APINV'), number, supplierId: s.id, poId: '', date, due: addDays(date, s.terms), lines, total, paid: 0, credited: 0, currency: fx.ccy, rate: fx.rate, holds: [], status: 'Validated', ref };
+    if (fx.fx) { inv.fxTotal = fxTotal; inv.fxPaid = 0; inv.fxCredited = 0; }
+    const j = createJournal({ date, source, desc: `Invoice ${number} (${s.name})${fx.fx ? ` ${ccyAmt(fxTotal, fx.ccy)} @ ${fx.rate}` : ''}`, ref: inv.id, lines: [...lines.map((l) => (l.amount > 0 ? { acct: l.acct, dr: l.amount, memo: l.desc } : { acct: l.acct, cr: -l.amount, memo: l.desc })), { acct: '2000', cr: total, memo: s.name }] });
+    inv.journal = j.id; S.apInvoices.push(inv); log('Entered invoice', inv.id, `${s.name} ${fx.fx ? ccyAmt(fxTotal, fx.ccy) + ' = ' : ''}${money(total)}`); return inv;
   }
   /** Receivables invoice not created by shipping (services, projects, fees):
-   *  createARInvoice({customerId, date, lines:[{acct, desc, amount}], source, ref}) -> Open invoice. */
-  function createARInvoice({ customerId, date, lines, source = 'Receivables', ref = '' }) {
+   *  createARInvoice({customerId, date, lines:[{acct, desc, amount}], source, ref, taxCode?, currency?, rate?}) -> Open invoice.
+   *  taxCode omitted = no tax. currency omitted = USD. Fields: net, tax, total (USD, total incl. tax); fxNet/fxTax/fxTotal when foreign. */
+  function createARInvoice({ customerId, date, lines, source = 'Receivables', ref = '', taxCode: tc = '', currency: ccy, rate }) {
     const c = need(cust(customerId), 'Customer'); assertOpen(date);
+    const fx = invoiceRate(ccy, rate, date); const tRate = taxRate(tc);
     lines = (lines || []).filter((l) => +l.amount).map((l) => ({ acct: String(l.acct), desc: l.desc || '', amount: r2(+l.amount) }));
     if (!lines.length) fail('Add at least one line with an amount.');
     lines.forEach((l) => { if (!acct(l.acct)) fail(`Account ${l.acct} does not exist.`); if (!Number.isFinite(l.amount)) fail('Amounts must be valid numbers.'); });
-    const total = sum(lines, (l) => l.amount); if (!(total > 0)) fail('The invoice total must be greater than zero.');
-    const inv = { id: nextId('ARINV'), customerId: c.id, soId: '', date, due: addDays(date, c.terms), total, paid: 0, status: 'Open', lines, ref };
-    const j = createJournal({ date, source, desc: `Invoice ${inv.id} (${c.name})${ref ? ' for ' + ref : ''}`, ref: inv.id, lines: [{ acct: '1100', dr: total }, ...lines.map((l) => (l.amount > 0 ? { acct: l.acct, cr: l.amount, memo: l.desc } : { acct: l.acct, dr: -l.amount, memo: l.desc }))] });
+    const fxNet = sum(lines, (l) => l.amount); if (!(fxNet > 0)) fail('The invoice total must be greater than zero.');
+    const fxTax = r2(fxNet * tRate);
+    if (fx.fx) lines.forEach((l) => { l.fxAmount = l.amount; l.amount = r2(l.amount * fx.rate); });
+    const net = sum(lines, (l) => l.amount), tax = fx.fx ? r2(fxTax * fx.rate) : fxTax, total = r2(net + tax);
+    if (!(net > 0)) fail('The invoice total must be greater than zero.');
+    if (tax) ensureCoreAccounts();
+    const inv = { id: nextId('ARINV'), customerId: c.id, soId: '', date, due: addDays(date, c.terms), net, tax, taxCode: tc || '', taxRate: tRate, total, paid: 0, credited: 0, currency: fx.ccy, rate: fx.rate, status: 'Open', lines, ref };
+    if (fx.fx) Object.assign(inv, { fxNet, fxTax, fxTotal: r2(fxNet + fxTax), fxPaid: 0, fxCredited: 0 });
+    const jl = [{ acct: '1100', dr: total }, ...lines.map((l) => (l.amount > 0 ? { acct: l.acct, cr: l.amount, memo: l.desc } : { acct: l.acct, dr: -l.amount, memo: l.desc }))];
+    if (tax) jl.push({ acct: '2300', cr: tax, memo: `Sales tax ${tc}` });
+    const j = createJournal({ date, source, desc: `Invoice ${inv.id} (${c.name})${ref ? ' for ' + ref : ''}${fx.fx ? ` ${ccyAmt(inv.fxTotal, fx.ccy)} @ ${fx.rate}` : ''}`, ref: inv.id, lines: jl });
     inv.journal = j.id; S.arInvoices.push(inv); log('Raised invoice', inv.id, `${c.name} ${money(total)}`); return inv;
   }
 
+  // ---------- credit memos ----------
+  const creditMemo = (id) => S.creditMemos.find((m) => m.id === id);
+  /** createARCreditMemo({invoiceId, date, amount, reason, returns:[{line, qty}]}) — amount in the invoice currency (incl. tax),
+   *  <= open balance. returns (shipped-order invoices only) put stock back at the line's original unit cost
+   *  (Dr 1200 / Cr 5000). With returns and no amount, the credit defaults to the returned lines at order price plus tax. */
+  function createARCreditMemo({ invoiceId, date, amount, reason, returns }) {
+    const inv = need(arinv(invoiceId), 'Invoice'); const c = cust(inv.customerId);
+    if (!(openAmt(inv) > 0.004)) fail(`${invoiceId} has no open balance to credit.`);
+    if (!String(reason || '').trim()) fail('Give a reason for the credit memo.');
+    assertOpen(date); if (date < inv.date) fail('A credit memo cannot be dated before its invoice.');
+    let ret = [];
+    const rq = (returns || []).filter((r) => +r.qty);
+    if (rq.length) {
+      if (!inv.soId) fail('Return to stock applies only to invoices raised by shipping a sales order.');
+      const o = need(so(inv.soId), 'Sales order');
+      ret = rq.map((r) => {
+        const li = +r.line, q = +r.qty, l = o.lines[li]; if (!l) fail(`${o.id} has no line ${li + 1}.`);
+        if (!Number.isInteger(q) || q < 0) fail('Return quantities must be whole numbers, zero or more.');
+        const left = l.qty - (l.returned || 0); if (q > left) fail(`${l.sku}: only ${left} shipped and not yet returned, not ${q}.`);
+        return { line: li, sku: l.sku, qty: q, price: l.price, unitCost: l.unitCost ?? item(l.sku).avgCost };
+      });
+      const dup = ret.find((r, i) => ret.findIndex((x) => x.line === r.line) !== i); if (dup) fail(`Line ${dup.line + 1} (${dup.sku}) appears twice.`);
+    }
+    const fx = isFx(inv), openF = fxOpen(inv);
+    if (amount === '' || amount == null) { if (!ret.length) fail('Enter the credit amount.'); amount = r2(sum(ret, (r) => r.qty * r.price) * (1 + (inv.taxRate || 0))); }
+    amount = r2(+amount);
+    if (!(amount > 0) || !Number.isFinite(amount)) fail('Enter a credit amount greater than zero.');
+    if (amount > openF + 0.001) fail(`Credit ${ccyAmt(amount, inv.currency)} is more than the open balance ${ccyAmt(openF, inv.currency)}.`);
+    const func = relieveFor(inv, amount);
+    const tax = inv.tax && inv.total > 0 ? r2(func * inv.tax / inv.total) : 0, net = r2(func - tax);
+    if (tax) ensureCoreAccounts();
+    const rev = inv.lines && inv.lines.length ? alloc(net, inv.lines.map((l) => l.amount)).map((v, k) => ({ acct: inv.lines[k].acct, v })) : [{ acct: '4000', v: net }];
+    const lines = [...rev.map((x) => (x.v >= 0 ? { acct: x.acct, dr: x.v, memo: 'Credit memo' } : { acct: x.acct, cr: -x.v, memo: 'Credit memo' }))];
+    if (tax) lines.push({ acct: '2300', dr: tax, memo: `Sales tax ${inv.taxCode}` });
+    lines.push({ acct: '1100', cr: func, memo: c.name });
+    const m = { id: nextId('ARCM'), side: 'AR', invoiceId, customerId: c.id, date, amount: func, net, tax, reason: String(reason).trim(), currency: inv.currency || FUNCTIONAL, returns: ret, createdBy: S.user };
+    if (fx) m.fxAmount = amount;
+    const j = createJournal({ date, source: 'Receivables', desc: `Credit memo ${m.id} on ${invoiceId} (${c.name}): ${m.reason}`, ref: m.id, lines });
+    m.journal = j.id;
+    if (ret.length) {
+      const value = r2(sum(ret, (r) => r.qty * r.unitCost));
+      const jr = createJournal({ date, source: 'Inventory', desc: `Customer return ${m.id} to stock (${inv.soId})`, ref: m.id, lines: [{ acct: '1200', dr: value }, { acct: '5000', cr: value }] });
+      m.returnJournal = jr.id; m.returnValue = value;
+      const o = so(inv.soId);
+      ret.forEach((r) => {
+        const it = item(r.sku);
+        it.avgCost = it.onHand > 0 ? r2((it.onHand * it.avgCost + r.qty * r.unitCost) / (it.onHand + r.qty)) : r.unitCost;
+        it.onHand += r.qty; o.lines[r.line].returned = (o.lines[r.line].returned || 0) + r.qty;
+        invTxn(date, r.sku, 'Customer return', r.qty, r.unitCost, m.id);
+      });
+      inventoryTrueUp(date, m.id, '5000');
+    }
+    inv.credited = r2((inv.credited || 0) + func); if (fx) inv.fxCredited = r2((inv.fxCredited || 0) + amount);
+    (inv.memos = inv.memos || []).push(m.id); settleStatus(inv, 'AR');
+    S.creditMemos.push(m); log('Issued credit memo', m.id, `${c.name} ${money(func)} on ${invoiceId}`); return m;
+  }
+  /** createAPCreditMemo({invoiceId, date, amount, reason}) — supplier credit (price adjustment) on a validated, unpaid invoice.
+   *  amount in the invoice currency, <= open. Dr 2000; Cr 5100 for PO invoices, or the original line accounts (pro rata) for direct invoices. */
+  function createAPCreditMemo({ invoiceId, date, amount, reason }) {
+    const inv = need(apinv(invoiceId), 'Invoice'); const s = sup(inv.supplierId);
+    if (inv.status !== 'Validated') fail(`Only validated, unpaid invoices can be credited. ${invoiceId} is ${inv.status}.`);
+    if (!String(reason || '').trim()) fail('Give a reason for the credit memo.');
+    assertOpen(date); if (date < inv.date) fail('A credit memo cannot be dated before its invoice.');
+    amount = r2(+amount); const openF = fxOpen(inv);
+    if (!(amount > 0) || !Number.isFinite(amount)) fail('Enter a credit amount greater than zero.');
+    if (amount > openF + 0.001) fail(`Credit ${ccyAmt(amount, inv.currency)} is more than the open balance ${ccyAmt(openF, inv.currency)}.`);
+    const func = relieveFor(inv, amount);
+    const cr = inv.poId ? [{ acct: '5100', v: func }] : alloc(func, inv.lines.map((l) => l.amount)).map((v, k) => ({ acct: inv.lines[k].acct, v }));
+    const lines = [{ acct: '2000', dr: func, memo: s.name }, ...cr.map((x) => (x.v >= 0 ? { acct: x.acct, cr: x.v, memo: 'Supplier credit' } : { acct: x.acct, dr: -x.v, memo: 'Supplier credit' }))];
+    const m = { id: nextId('APCM'), side: 'AP', invoiceId, supplierId: s.id, date, amount: func, reason: String(reason).trim(), currency: inv.currency || FUNCTIONAL, createdBy: S.user };
+    if (isFx(inv)) m.fxAmount = amount;
+    const j = createJournal({ date, source: 'Payables', desc: `Supplier credit memo ${m.id} on ${inv.number} (${s.name}): ${m.reason}`, ref: m.id, lines });
+    m.journal = j.id;
+    inv.credited = r2((inv.credited || 0) + func); if (isFx(inv)) inv.fxCredited = r2((inv.fxCredited || 0) + amount);
+    (inv.memos = inv.memos || []).push(m.id); settleStatus(inv, 'AP');
+    S.creditMemos.push(m); log('Recorded supplier credit memo', m.id, `${s.name} ${money(func)} on ${invoiceId}`); return m;
+  }
+
   // ---------- order to cash ----------
-  const openAR = (custId) => sum(S.arInvoices.filter((i) => i.customerId === custId && i.status !== 'Paid'), (i) => i.total - i.paid);
-  const openOrders = (custId) => sum(S.sos.filter((o) => o.customerId === custId && (o.status === 'Booked')), (o) => o.total);
+  const openAR = (custId) => sum(S.arInvoices.filter((i) => i.customerId === custId && i.status !== 'Paid'), (i) => openAmt(i));
+  /** Order value including the customer's sales tax (what credit exposure counts). */
+  const soGross = (o) => r2(o.total * (1 + taxRate(cust(o.customerId)?.taxCode)));
+  const openOrders = (custId) => sum(S.sos.filter((o) => o.customerId === custId && (o.status === 'Booked')), (o) => soGross(o));
   /** createSO({customerId, date, lines:[{sku, qty, price}], poNumber}) — credit check */
   function createSO({ customerId, date, lines, poNumber = '' }) {
     const c = need(cust(customerId), 'Customer'); if (!isDate(date)) fail('Enter a valid order date.');
@@ -594,7 +705,7 @@
     lines.forEach((l) => { need(item(l.sku), `Item ${l.sku}`); if (!Number.isInteger(l.qty)) fail('Quantities must be whole numbers.'); if (!(l.price > 0) || !Number.isFinite(l.price)) fail(`Enter a price greater than zero for ${l.sku}.`); });
     const seen = new Set(); for (const l of lines) { if (seen.has(l.sku)) fail(`${l.sku} is on the order twice. Combine it into one line.`); seen.add(l.sku); }
     const total = sum(lines, (l) => l.qty * l.price);
-    const exposure = r2(openAR(c.id) + openOrders(c.id) + total);
+    const exposure = r2(openAR(c.id) + openOrders(c.id) + total * (1 + taxRate(c.taxCode)));
     const o = { id: nextId('SO'), customerId: c.id, date, poNumber, lines, total, status: exposure > c.creditLimit ? 'Credit Hold' : 'Booked', exposure };
     if (o.status === 'Credit Hold') o.hold = `Exposure ${money(exposure)} exceeds credit limit ${money(c.creditLimit)}`;
     S.sos.push(o); log(o.status === 'Booked' ? 'Booked sales order' : 'Sales order on credit hold', o.id, o.hold || `${c.name} ${money(total)}`); return o;
@@ -616,30 +727,44 @@
     const c = cust(o.customerId);
     const j1 = createJournal({ date, source: 'Shipping', desc: `Cost of goods shipped ${id} (${c.name})`, ref: id, lines: [{ acct: '5000', dr: cogs }, { acct: '1200', cr: cogs }] });
     o.lines.forEach((l) => { const it = item(l.sku); it.onHand -= l.qty; invTxn(date, l.sku, 'Shipment', -l.qty, l.unitCost, id); });
-    const inv = { id: nextId('ARINV'), customerId: c.id, soId: id, date, due: addDays(date, c.terms), total: o.total, paid: 0, status: 'Open' };
-    const j2 = createJournal({ date, source: 'Receivables', desc: `Invoice ${inv.id} for ${id} (${c.name})`, ref: inv.id, lines: [{ acct: '1100', dr: o.total }, { acct: '4000', cr: o.total }] });
+    const tRate = taxRate(c.taxCode), tax = r2(o.total * tRate), gross = r2(o.total + tax);
+    if (tax) ensureCoreAccounts();
+    const inv = { id: nextId('ARINV'), customerId: c.id, soId: id, date, due: addDays(date, c.terms), net: o.total, tax, taxCode: c.taxCode || '', taxRate: tRate, total: gross, paid: 0, credited: 0, currency: FUNCTIONAL, rate: 1, status: 'Open' };
+    const l2 = [{ acct: '1100', dr: gross }, { acct: '4000', cr: o.total }]; if (tax) l2.push({ acct: '2300', cr: tax, memo: `Sales tax ${c.taxCode}` });
+    const j2 = createJournal({ date, source: 'Receivables', desc: `Invoice ${inv.id} for ${id} (${c.name})`, ref: inv.id, lines: l2 });
     inv.journal = j2.id; S.arInvoices.push(inv);
-    o.status = 'Invoiced'; o.shipDate = date; o.invoiceId = inv.id; o.cogsJournal = j1.id; o.margin = r2(o.total - cogs);
-    log('Shipped and invoiced', id, `${inv.id} ${money(o.total)}`); return inv;
+    o.status = 'Invoiced'; o.shipDate = date; o.invoiceId = inv.id; o.cogsJournal = j1.id; o.margin = r2(o.total - cogs); o.tax = tax;
+    log('Shipped and invoiced', id, `${inv.id} ${money(gross)}`); return inv;
   }
+  /** applyReceipt({invoiceId, date, amount, reference}) — amount is in the invoice currency.
+   *  Foreign invoices: cash = amount x the receipt date's rate; the difference to the carrying amount
+   *  relieved posts to 7100 Realized FX gain/loss. receipt.amount is the USD cash received. */
   function applyReceipt({ invoiceId, date, amount, reference = '' }) {
     const inv = need(arinv(invoiceId), 'Invoice'); amount = r2(+amount);
     if (inv.status === 'Paid') fail(`${invoiceId} is already paid.`);
-    const open = r2(inv.total - inv.paid);
+    if (inv.status === 'Credited') fail(`${invoiceId} was fully credited and has nothing to collect.`);
+    const open = fxOpen(inv);
     if (!(amount > 0) || !Number.isFinite(amount)) fail('Enter a receipt amount greater than zero.');
-    if (amount > open + 0.001) fail(`Receipt ${money(amount)} is more than the open balance ${money(open)}.`);
+    if (amount > open + 0.001) fail(`Receipt ${ccyAmt(amount, inv.currency)} is more than the open balance ${ccyAmt(open, inv.currency)}.`);
+    assertOpen(date);
+    const fx = isFx(inv), rate = fx ? fxRate(inv.currency, date) : 1;
+    const relieved = fx ? relieveFor(inv, amount) : amount, cash = fx ? r2(amount * rate) : amount, gain = r2(cash - relieved);
     const c = cust(inv.customerId);
-    const j = createJournal({ date, source: 'Receivables', desc: `Receipt from ${c.name} on ${invoiceId}${reference ? ' ref ' + reference : ''}`, ref: invoiceId, lines: [{ acct: '1000', dr: amount }, { acct: '1100', cr: amount }] });
-    const rc = { id: nextId('RCPT'), customerId: c.id, invoiceId, date, amount, reference, journal: j.id };
-    S.receipts.push(rc); inv.paid = r2(inv.paid + amount); inv.status = inv.paid >= inv.total ? 'Paid' : 'Partially Paid';
-    log('Applied customer receipt', rc.id, `${c.name} ${money(amount)}`); return rc;
+    const lines = [{ acct: '1000', dr: cash }, { acct: '1100', cr: relieved }];
+    if (gain) { ensureCoreAccounts(); lines.push(gain > 0 ? { acct: '7100', cr: gain, memo: 'Realized FX gain' } : { acct: '7100', dr: -gain, memo: 'Realized FX loss' }); }
+    const j = createJournal({ date, source: 'Receivables', desc: `Receipt from ${c.name} on ${invoiceId}${fx ? ` ${ccyAmt(amount, inv.currency)} @ ${rate}` : ''}${reference ? ' ref ' + reference : ''}`, ref: invoiceId, lines });
+    const rc = { id: nextId('RCPT'), customerId: c.id, invoiceId, date, amount: cash, reference, journal: j.id };
+    if (fx) Object.assign(rc, { currency: inv.currency, fxAmount: amount, rate, carrying: relieved, fxGainLoss: gain });
+    S.receipts.push(rc); inv.paid = r2(inv.paid + relieved); if (fx) inv.fxPaid = r2((inv.fxPaid || 0) + amount);
+    settleStatus(inv, 'AR');
+    log('Applied customer receipt', rc.id, `${c.name} ${money(cash)}`); return rc;
   }
   function arAging(asOf = S.today) {
     const buckets = ['Current', '1-30', '31-60', '61-90', '90+'];
     const rows = S.customers.map((c) => {
       const r = { customerId: c.id, name: c.name, total: 0 }; buckets.forEach((b) => (r[b] = 0));
       S.arInvoices.filter((i) => i.customerId === c.id && i.status !== 'Paid').forEach((i) => {
-        const late = daysBetween(i.due, asOf), open = r2(i.total - i.paid);
+        const late = daysBetween(i.due, asOf), open = openAmt(i);
         const b = late <= 0 ? 'Current' : late <= 30 ? '1-30' : late <= 60 ? '31-60' : late <= 90 ? '61-90' : '90+';
         r[b] = r2(r[b] + open); r.total = r2(r.total + open);
       });
@@ -718,16 +843,57 @@
       { task: 'Invoice holds resolved', done: !holds, detail: holds ? `${holds} on hold` : 'No holds' },
       { task: 'Open receipts reviewed', done: !unreceived, detail: unreceived ? `${unreceived} PO(s) not fully received` : 'All received', advisory: true },
       { task: 'Subledgers reconcile to GL', done: rec, detail: rec ? 'AP, AR, inventory, accrual tie out' : 'Differences found' },
+      recurringCheck(p),
+      { task: 'Foreign-currency open items reviewed', done: !fxOpenItems().length, advisory: true, detail: fxOpenItems().length ? `${fxOpenItems().length} open EUR/GBP invoice(s) carried at booking rates; unrealized revaluation is not posted` : 'No open foreign-currency items' },
+      salesTaxCheck(p),
       ...hooks.checklist.flatMap((f) => f(p)),
       { task: 'Period closed', done: S.periods[p] === 'Closed', detail: S.periods[p] },
     ];
   }
+  function recurringCheck(p) {
+    const due = S.recurring.filter((t) => t.active && t.startPeriod <= p && !t.generated[p]);
+    return { task: 'Recurring journals generated', done: !due.length, advisory: true, detail: due.length ? `${due.map((t) => t.name).join(', ')} not generated` : 'All templates generated' };
+  }
+  const fxOpenItems = () => [...S.apInvoices.filter((i) => i.status === 'Validated'), ...S.arInvoices.filter((i) => i.status !== 'Paid' && i.status !== 'Credited')].filter((i) => isFx(i) && openAmt(i) > 0);
+  function salesTaxCheck(p) {
+    const prev = Object.keys(S.periods).sort().filter((x) => x < p).pop();
+    if (!prev) return { task: 'Prior month sales tax remitted', done: true, advisory: true, detail: 'No prior period' };
+    const due = salesTaxDue(prev), rem = S.taxRemits.find((r) => r.period === prev);
+    return { task: 'Prior month sales tax remitted', done: !!rem || due <= 0, advisory: true, detail: rem ? `${periodLabel(prev)} remitted (${rem.journal})` : due > 0 ? `${periodLabel(prev)}: ${money(due)} due` : `Nothing due for ${periodLabel(prev)}` };
+  }
+
+  // ---------- sales tax ----------
+  /** salesTaxReport() -> rows [{period, code, name, rate, taxable, tax, creditTaxable, creditTax, netTax}] for periods with activity. */
+  function salesTaxReport() {
+    const m = new Map();
+    const row = (p, code) => { const k = p + '|' + code; if (!m.has(k)) { const t = taxCode(code); m.set(k, { period: p, code, name: t ? t.name : 'No tax code', rate: t ? t.rate : 0, taxable: 0, tax: 0, creditTaxable: 0, creditTax: 0, netTax: 0, invoices: 0 }); } return m.get(k); };
+    S.arInvoices.forEach((i) => { if (i.net == null) return; const r = row(periodOf(i.date), i.taxCode || ''); r.taxable = r2(r.taxable + i.net); r.tax = r2(r.tax + (i.tax || 0)); r.invoices++; });
+    S.creditMemos.filter((x) => x.side === 'AR').forEach((x) => { const i = arinv(x.invoiceId); const r = row(periodOf(x.date), i.taxCode || ''); r.creditTaxable = r2(r.creditTaxable + x.net); r.creditTax = r2(r.creditTax + x.tax); });
+    return [...m.values()].map((r) => ({ ...r, netTax: r2(r.tax - r.creditTax) })).sort((a, b) => a.period.localeCompare(b.period) || a.code.localeCompare(b.code));
+  }
+  const salesTaxDue = (p) => sum(salesTaxReport().filter((r) => r.period === p), (r) => r.netTax);
+  /** remitSalesTax({period, date, reference}) — pays the period's net sales tax: Dr 2300 / Cr 1000. Once per period, after it ends. */
+  function remitSalesTax({ period, date, reference = '' }) {
+    if (!S.periods[period]) fail('Choose a period inside the FY2027 calendar.');
+    const done = S.taxRemits.find((r) => r.period === period); if (done) fail(`Sales tax for ${periodLabel(period)} was already remitted (${done.journal}).`);
+    if (!isDate(date)) fail('Enter a valid remittance date.');
+    if (date <= periodEnd(period)) fail(`Remit ${periodLabel(period)} sales tax after the period ends (on or after ${addDays(periodEnd(period), 1)}).`);
+    assertOpen(date);
+    const amt = salesTaxDue(period); if (!(amt > 0)) fail(`No sales tax is due for ${periodLabel(period)}.`);
+    const cash = balance('1000'); if (amt > cash) fail(`Remittance of ${money(amt)} exceeds operating cash of ${money(cash)}.`);
+    ensureCoreAccounts();
+    const id = nextId('STX');
+    const j = createJournal({ date, source: 'Tax', desc: `Sales tax remittance ${periodLabel(period)}${reference ? ' ref ' + reference : ''}`, ref: id, lines: [{ acct: '2300', dr: amt }, { acct: '1000', cr: amt }] });
+    const r = { id, period, date, amount: amt, reference, journal: j.id }; S.taxRemits.push(r);
+    log('Remitted sales tax', id, `${periodLabel(period)} ${money(amt)}`); return r;
+  }
+
   /** Subledger-to-GL reconciliation for the four control accounts. */
   function reconcile() {
     const b = balances();
     const rows = [
-      { name: 'Accounts payable', acct: '2000', sub: sum(S.apInvoices.filter((i) => i.status === 'Validated'), (i) => i.total - i.paid), gl: -b['2000'] },
-      { name: 'Accounts receivable', acct: '1100', sub: sum(S.arInvoices.filter((i) => i.status !== 'Paid'), (i) => i.total - i.paid), gl: b['1100'] },
+      { name: 'Accounts payable', acct: '2000', sub: sum(S.apInvoices.filter((i) => i.status === 'Validated'), (i) => openAmt(i)), gl: -b['2000'] },
+      { name: 'Accounts receivable', acct: '1100', sub: sum(S.arInvoices.filter((i) => i.status !== 'Paid'), (i) => openAmt(i)), gl: b['1100'] },
       { name: 'Inventory', acct: '1200', sub: sum(S.items, (i) => i.onHand * i.avgCost), gl: b['1200'] },
       { name: 'Received not invoiced', acct: '2100', sub: sum(S.pos.flatMap((p) => p.lines), (l) => (l.received - l.invoiced) * l.price), gl: -b['2100'] },
     ];
@@ -748,13 +914,15 @@
     S.journals.forEach((j) => hit(j.id, j.desc) && out.push({ kind: 'je', id: j.id, label: j.id, sub: j.desc }));
     S.apInvoices.forEach((i) => hit(i.id, i.number) && out.push({ kind: 'apinv', id: i.id, label: `${i.id} (${i.number})`, sub: `${sup(i.supplierId).name}, ${i.status}` }));
     S.arInvoices.forEach((i) => hit(i.id) && out.push({ kind: 'arinv', id: i.id, label: i.id, sub: `${cust(i.customerId).name}, ${i.status}` }));
+    S.creditMemos.forEach((m) => hit(m.id, m.reason) && out.push({ kind: 'cm', id: m.id, label: m.id, sub: `${m.side === 'AR' ? cust(m.customerId)?.name : sup(m.supplierId)?.name} credit memo, ${m.reason}` }));
+    S.recurring.forEach((t) => hit(t.id, t.name) && out.push({ kind: 'rj', id: t.id, label: t.name, sub: `Recurring journal ${t.id}` }));
     S.reqs.forEach((r) => hit(r.id, r.requester) && out.push({ kind: 'req', id: r.id, label: r.id, sub: `${r.requester}, ${r.status}` }));
     hooks.search.forEach((f) => out.push(...f(q, hit)));
     return out.slice(0, 30);
   }
 
   const Engine = {
-    TODAY, FY_START, ROLE_USERS, REQ_APPROVAL_LIMIT, JE_APPROVAL_LIMIT, PRICE_TOLERANCE, WITHHOLDING_RATE, EMPLOYER_TAX_RATE, DEPRECIATION_MONTHS, ROLES,
+    TODAY, FY_START, STATE_VERSION, FUNCTIONAL, ROLE_USERS, REQ_APPROVAL_LIMIT, JE_APPROVAL_LIMIT, PRICE_TOLERANCE, WITHHOLDING_RATE, EMPLOYER_TAX_RATE, DEPRECIATION_MONTHS, ROLES,
     get S() { return S; }, set S(v) { S = v; },
     reset, load, can, log, nextId,
     util: { r2, sum, periodOf, addDays, daysBetween, periodEnd, periodLabel, money, businessDays, isDate },
@@ -768,6 +936,9 @@
     hireEmployee, terminateEmployee, requestAbsence, approveAbsence, rejectAbsence, runPayroll,
     approvalsInbox, closeChecklist, reconcile, search,
     createAPInvoice, createARInvoice,
+    taxCode, taxRate, currency, fxRate, setFxRate, isFx, openAmt, fxOpen, ccyAmt, soGross,
+    creditMemo, createARCreditMemo, createAPCreditMemo, salesTaxReport, salesTaxDue, remitSalesTax,
+    reverseJournal, processAutoReversals, nextPeriod, recurring, createRecurring, recurringFromJournal, generateRecurring, setRecurringActive,
     hooks, on, addPerms, touch, ensureAccount, need, fail,
     /** Add or replace engine functions from an extension module. */
     extend(obj) { Object.keys(obj).forEach((k) => { Engine[k] = obj[k]; }); return Engine; },

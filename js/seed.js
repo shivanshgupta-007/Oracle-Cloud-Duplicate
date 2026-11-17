@@ -13,16 +13,20 @@
     const rand = rng(20261117);
     const ri = (a, b) => a + Math.floor(rand() * (b - a + 1));
     const at = (d) => { S._clock = d + 'T' + String(ri(8, 17)).padStart(2, '0') + ':' + String(ri(0, 59)).padStart(2, '0') + ':00Z'; S._date = d; };
+    // Clock for phase-2 seed activity: fixed times, so the original random stream (and history) is unchanged.
+    const at2 = (d, t = '10:30') => { S._clock = `${d}T${t}:00Z`; S._date = d; };
     const asRole = (role, user, fn) => { const r = S.role, u = S.user; S.role = role; S.user = user; try { return fn(); } finally { S.role = r; S.user = u; } };
 
     [['1000', 'Cash, operating account', 'Asset'], ['1100', 'Accounts receivable', 'Asset'], ['1200', 'Inventory', 'Asset'],
      ['1500', 'Equipment', 'Asset'], ['1510', 'Accumulated depreciation', 'Asset'],
-     ['2000', 'Accounts payable', 'Liability'], ['2100', 'Received not invoiced', 'Liability'], ['2200', 'Payroll liabilities', 'Liability'], ['2500', 'Term loan', 'Liability'],
+     ['2000', 'Accounts payable', 'Liability'], ['2100', 'Received not invoiced', 'Liability'], ['2200', 'Payroll liabilities', 'Liability'],
+     ['2300', 'Sales tax payable', 'Liability'], ['2400', 'Accrued liabilities', 'Liability'], ['2500', 'Term loan', 'Liability'],
      ['3000', 'Share capital', 'Equity'], ['3100', 'Retained earnings', 'Equity'],
-     ['4000', 'Product revenue', 'Revenue'], ['4900', 'Other income', 'Revenue'],
+     ['4000', 'Product revenue', 'Revenue'], ['4100', 'Service revenue', 'Revenue'], ['4900', 'Other income', 'Revenue'],
      ['5000', 'Cost of goods sold', 'Expense'], ['5100', 'Purchase price variance', 'Expense'],
      ['6000', 'Salaries and wages', 'Expense'], ['6050', 'Employer payroll taxes', 'Expense'], ['6100', 'Rent', 'Expense'],
      ['6200', 'Utilities', 'Expense'], ['6300', 'Depreciation', 'Expense'], ['6400', 'Software and subscriptions', 'Expense'], ['6500', 'Travel', 'Expense'],
+     ['6800', 'Professional and testing services', 'Expense'], ['7100', 'Realized FX gain/loss', 'Expense'],
     ].forEach(([code, name, type]) => S.accounts.push({ code, name, type, active: true }));
 
     ['2026-07', '2026-08', '2026-09', '2026-10', '2026-11'].forEach((p) => (S.periods[p] = 'Open'));
@@ -37,11 +41,15 @@
     const openingInv = E.util.r2(S.items.reduce((a, i) => a + i.onHand * i.avgCost, 0));
 
     at('2026-07-01');
-    const sups = [['Arden Precision Parts', 30, 'Dayton, OH'], ['Kestrel Electronics', 45, 'San Jose, CA'], ['Brightwire Cable Co.', 30, 'Erie, PA'], ['Valemont Instruments GmbH', 60, 'Stuttgart, DE']]
-      .map(([name, terms, site]) => E.addSupplier({ name, terms, site }));
-    const custs = [['Corran Biolabs', 30, 600000, 'Life sciences'], ['Meridian Water Authority', 45, 900000, 'Public utility'], ['Ostrava Foods', 30, 120000, 'Food processing'],
-      ['Pinecrest University', 60, 300000, 'Education'], ['Solace Pharma', 30, 700000, 'Life sciences']]
-      .map(([name, terms, creditLimit, segment]) => E.addCustomer({ name, terms, creditLimit, segment }));
+    const sups = [['Arden Precision Parts', 30, 'Dayton, OH'], ['Kestrel Electronics', 45, 'San Jose, CA'], ['Brightwire Cable Co.', 30, 'Erie, PA'], ['Valemont Instruments GmbH', 60, 'Stuttgart, DE', 'EUR']]
+      .map(([name, terms, site, currency]) => E.addSupplier({ name, terms, site, currency: currency || 'USD' }));
+    const custs = [['Corran Biolabs', 30, 600000, 'Life sciences', 'MA'], ['Meridian Water Authority', 45, 900000, 'Public utility', 'EXEMPT'], ['Ostrava Foods', 30, 120000, 'Food processing', 'NY'],
+      ['Pinecrest University', 60, 300000, 'Education', 'EXEMPT'], ['Solace Pharma', 30, 700000, 'Life sciences', 'NJ']]
+      .map(([name, terms, creditLimit, segment, taxCode]) => E.addCustomer({ name, terms, creditLimit, segment, taxCode }));
+    // Export customer billed in sterling (not part of the order rotation below)
+    const harrow = E.addCustomer({ name: 'Harrow Analytical Ltd', terms: 30, creditLimit: 150000, segment: 'Life sciences', currency: 'GBP', taxCode: 'EU-EXPORT' });
+    const valemont = sups[3];
+    const rentJE = {}, softJE = {};
 
     // Opening balances
     E.createJournal({ date: '2026-07-01', source: 'Opening', desc: 'Opening balances FY2027', lines: [
@@ -118,17 +126,34 @@
         }
       }
       // ---------- recurring expenses ----------
-      at(D(p, 1)); E.createJournal({ date: D(p, 1), source: 'Payables', desc: `Rent, Fenwick Park unit 4 (${E.util.periodLabel(p)})`, lines: [{ acct: '6100', dr: 14500 }, { acct: '1000', cr: 14500 }] });
+      at(D(p, 1)); rentJE[p] = E.createJournal({ date: D(p, 1), source: 'Payables', desc: `Rent, Fenwick Park unit 4 (${E.util.periodLabel(p)})`, lines: [{ acct: '6100', dr: 14500 }, { acct: '1000', cr: 14500 }] }).id;
       if (!last) {
         at(D(p, 20)); const u = E.util.r2(2100 + rand() * 900); E.createJournal({ date: D(p, 20), source: 'Payables', desc: 'Electricity and water', lines: [{ acct: '6200', dr: u }, { acct: '1000', cr: u }] });
-        at(D(p, 6)); E.createJournal({ date: D(p, 6), source: 'Payables', desc: 'ERP, CAD and design software licences', lines: [{ acct: '6400', dr: 4850 }, { acct: '1000', cr: 4850 }] });
+        at(D(p, 6)); softJE[p] = E.createJournal({ date: D(p, 6), source: 'Payables', desc: 'ERP, CAD and design software licences', lines: [{ acct: '6400', dr: 4850 }, { acct: '1000', cr: 4850 }] }).id;
         // remit last month's payroll liabilities
         const liab = -E.balance('2200'); if (liab > 0) { at(D(p, 15)); E.createJournal({ date: D(p, 15), source: 'Payroll', desc: 'Remit payroll taxes to tax authority', lines: [{ acct: '2200', dr: liab }, { acct: '1000', cr: liab }] }); }
         at(E.util.periodEnd(p)); E.runPayroll(p);
         E.runDepreciation(p);
         at(D(p, 25)); const t = E.util.r2(1800 + rand() * 2600); E.createJournal({ date: D(p, 25), source: 'Payables', desc: 'Sales travel, customer site visits', lines: [{ acct: '6500', dr: t }, { acct: '1000', cr: t }] });
       }
+      // ---------- sales tax, foreign currency, accruals (fixed amounts; no random draws) ----------
+      const prev = months[mi - 1];
+      if (prev) { at2(D(p, 15)); E.remitSalesTax({ period: prev, date: D(p, 15), reference: `DOR-${prev.replace('-', '')}` }); }
+      const eur = { '2026-07': 4200, '2026-08': 3850, '2026-09': 5100, '2026-10': 4475, '2026-11': 3900 }[p];
+      at2(D(p, 8)); E.createAPInvoice({ supplierId: valemont.id, number: `VAL-CS-${p.replace('-', '')}`, date: D(p, 8), currency: 'EUR', lines: [{ acct: '6800', desc: `Calibration and certification services ${E.util.periodLabel(p)}`, amount: eur }] });
+      if (prev && !last) { const pi = S.apInvoices.find((i) => i.number === `VAL-CS-${prev.replace('-', '')}`); at2(D(p, 24)); E.payInvoices([pi.id], D(p, 24), 'Wire'); }
+      at2(D(p, 10)); E.createARInvoice({ customerId: harrow.id, date: D(p, 10), currency: 'GBP', taxCode: 'EU-EXPORT', lines: [{ acct: '4100', desc: `Calibration service contract ${E.util.periodLabel(p)}`, amount: 6800 }] });
+      if (prev) { const hi = S.arInvoices.find((i) => i.customerId === harrow.id && E.util.periodOf(i.date) === prev); at2(D(p, 12)); E.applyReceipt({ invoiceId: hi.id, date: D(p, 12), amount: E.fxOpen(hi), reference: `BACS${prev.replace('-', '')}` }); }
+      const accr = { '2026-09': ['Accrue September inbound freight not yet billed', 3150], '2026-10': ['Accrue October audit and tax advisory fees', 8500] }[p];
+      if (accr) { at2(E.util.periodEnd(p), '16:00'); asRole('Controller', 'Avery Lin', () => E.createManualJournal({ date: E.util.periodEnd(p), desc: accr[0], autoReverse: true, lines: [{ acct: '6800', dr: accr[1] }, { acct: '2400', cr: accr[1] }] })); }
       E.hooks.seedMonthly.forEach((f) => f(p, ctx));
+    });
+
+    // Recurring templates for rent and licences (history above stays as posted; links each month's journal)
+    at2('2026-07-01', '09:00');
+    asRole('Controller', 'Avery Lin', () => {
+      E.createRecurring({ name: 'Office rent, Fenwick Park unit 4', desc: 'Rent, Fenwick Park unit 4 ({period})', lines: [{ acct: '6100', dr: 14500 }, { acct: '1000', cr: 14500 }], startPeriod: '2026-07', day: 1, source: 'Payables', generated: rentJE });
+      E.createRecurring({ name: 'Software licences (ERP, CAD, design)', desc: 'ERP, CAD and design software licences ({period})', lines: [{ acct: '6400', dr: 4850 }, { acct: '1000', cr: 4850 }], startPeriod: '2026-07', day: 6, source: 'Payables', generated: softJE });
     });
 
     // ---------- live demo state for "today" (Nov 17) ----------
@@ -143,6 +168,13 @@
     at('2026-11-17');
     E.requestAbsence({ empId: S.employees.find((e) => e.name === 'Hana Sato').id, type: 'Vacation', start: '2026-12-21', end: '2026-12-31', note: 'Year-end travel' });
     E.requestAbsence({ empId: S.employees.find((e) => e.name === 'Kwame Asante').id, type: 'Sick', start: '2026-11-17', end: '2026-11-18', note: '' });
+    // Credit memos: a damaged-shipment return to stock, and a supplier rate correction in euros
+    const retInv = S.arInvoices.find((i) => i.soId && i.status === 'Open' && i.tax > 0 && i.date >= '2026-11-01' && i.date <= '2026-11-10' && E.so(i.soId).lines.some((l) => l.qty >= 2 && l.sku !== 'CB-010'));
+    if (retInv) { const o = E.so(retInv.soId); const li = o.lines.findIndex((l) => l.qty >= 2 && l.sku !== 'CB-010'); at2('2026-11-13'); E.createARCreditMemo({ invoiceId: retInv.id, date: '2026-11-13', reason: 'Damaged in transit, returned to stock', returns: [{ line: li, qty: 2 }] }); }
+    const valOct = S.apInvoices.find((i) => i.number === 'VAL-CS-202610');
+    at2('2026-11-06'); E.createAPCreditMemo({ invoiceId: valOct.id, date: '2026-11-06', amount: 275, reason: 'Rate correction on October calibration hours' });
+    // Accrual waiting for December to open (auto-reverses on 1 Dec)
+    at2('2026-11-16', '15:00'); asRole('Controller', 'Avery Lin', () => E.createManualJournal({ date: '2026-11-16', desc: 'Accrue November contract engineering hours', autoReverse: true, lines: [{ acct: '6800', dr: 6200 }, { acct: '2400', cr: 6200 }] }));
 
     E.hooks.seedFinal.forEach((f) => f(ctx));
 

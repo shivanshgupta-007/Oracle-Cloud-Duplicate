@@ -24,7 +24,7 @@
       <div class="row">${App.field('Category', App.select('faCat', cats.map((c) => [c.code, `${c.name} (${c.life} months)`]), cats[0].code))}${App.field('Useful life (months)', App.input('faLife', cats[0].life, 'number', 'min="1" step="1"'))}${App.field('Capitalization date', App.input('faDate', today(), 'date'))}</div>
       <div class="row">${App.field('Cost', App.input('faCost', '', 'number', 'min="0" step="0.01"'))}${App.field('Salvage value', App.input('faSalvage', '0', 'number', 'min="0" step="0.01"'), 'Optional; depreciation stops at cost less salvage')}</div>
       <div class="row">${App.field('Department', App.select('faDept', S.departments, 'Operations'))}${App.field('Location', App.input('faLoc', 'Boston, MA'))}${App.field('Custodian', App.select('faCust', [['', 'No custodian']].concat(active.map((e) => [e.id, e.name]))))}</div>
-      <div class="row">${App.field('Paid by', App.select('faMethod', [['cash', 'Cash (bank transfer)'], ['invoice', 'Supplier invoice']], 'cash'))}${App.field('Supplier', App.select('faSup', S.suppliers.map((s) => [s.id, s.name])))}${App.field('Supplier invoice no.', App.input('faInv', '', 'text', 'placeholder="e.g. VAL-26-1201"'))}</div>
+      <div class="row">${App.field('Paid by', App.select('faMethod', [['cash', 'Cash (bank transfer)'], ['invoice', 'Supplier invoice']], 'cash'))}${App.field('Supplier', App.select('faSup', S.suppliers.map((s) => [s.id, s.name])))}${App.field('Supplier invoice no.', App.input('faInv', '', 'text', 'placeholder="e.g. KES-26-1201"'))}</div>
       <div class="callout" id="faInfo"></div>`;
     App.drawer('Add asset', html, {
       submitLabel: 'Add asset', wide: true,

@@ -343,7 +343,7 @@
     const S = ctx.S; const byName = (n) => S.employees.find((e) => e.name === n)?.id || '';
     if (p === '2026-08') {
       ctx.at('2026-08-18');
-      addAsset({ name: 'Mixed-signal oscilloscope, 8-channel', category: 'LAB', cost: 18400, salvage: 400, date: '2026-08-18', dept: 'Engineering', location: 'Boston, MA: test lab', custodian: byName('Hana Sato'), method: 'invoice', supplierId: ctx.sups[3].id, invoiceNumber: 'VAL-26-0815' });
+      addAsset({ name: 'Mixed-signal oscilloscope, 8-channel', category: 'LAB', cost: 18400, salvage: 400, date: '2026-08-18', dept: 'Engineering', location: 'Boston, MA: test lab', custodian: byName('Hana Sato'), method: 'invoice', supplierId: ctx.sups[1].id, invoiceNumber: 'KES-26-0815' });
     }
     if (p === '2026-09') {
       ctx.at('2026-09-10');
@@ -361,7 +361,7 @@
   E.on('seedFinal', (ctx) => {
     const S = ctx.S;
     ctx.at('2026-11-16');
-    addAsset({ name: 'Climatic chamber, 1,000 L', category: 'LAB', cost: 68000, salvage: 4000, date: '2026-11-16', dept: 'Engineering', location: 'Boston, MA: test lab', custodian: S.employees.find((e) => e.name === 'Oliver Brandt')?.id || '', method: 'invoice', supplierId: ctx.sups[3].id, invoiceNumber: 'VAL-26-1142' });
+    addAsset({ name: 'Climatic chamber, 1,000 L', category: 'LAB', cost: 68000, salvage: 4000, date: '2026-11-16', dept: 'Engineering', location: 'Boston, MA: test lab', custodian: S.employees.find((e) => e.name === 'Oliver Brandt')?.id || '', method: 'invoice', supplierId: ctx.sups[1].id, invoiceNumber: 'KES-26-1142' });
   });
 
   E.extend({

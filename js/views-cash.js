@@ -65,7 +65,7 @@
     const pos = E.cashPosition(), f = E.cashForecast();
     const book = U.sum(pos, (p) => p.book);
     const asTable = ui.filter.cashChart === 'table';
-    const kpis = `<div class="kpis">${App.kpi('Cash today (book)', fmt(book), `${pos.length} bank account(s), GL ${pos.map((p) => p.account.gl).join(', ')}`)}${App.kpi('Last statement balance', pos[0]?.lastStatement ? fmt(pos[0].lastStatement.closing) : 'None', pos[0]?.lastStatement ? `as of ${fdate(pos[0].lastStatement.date)}` : '')}${App.kpi('Projected in 13 weeks', fmt(f.closing), `net ${fmt(f.totals.net)} to ${fdate(f.horizon)}`)}${App.kpi('Lowest projected balance', fmt(f.low.closing), `week of ${fdate(f.low.start)}`)}</div>`;
+    const kpis = `<div class="kpis">${App.kpi('Cash today (book)', App.fmt0(book), `${pos.length} bank account(s), GL ${pos.map((p) => p.account.gl).join(', ')}`)}${App.kpi('Last statement balance', pos[0]?.lastStatement ? App.fmt0(pos[0].lastStatement.closing) : 'None', pos[0]?.lastStatement ? `as of ${fdate(pos[0].lastStatement.date)}` : '')}${App.kpi('Projected in 13 weeks', App.fmt0(f.closing), `net ${fmt(f.totals.net)} to ${fdate(f.horizon)}`)}${App.kpi('Lowest projected balance', App.fmt0(f.low.closing), `week of ${fdate(f.low.start)}`)}</div>`;
     const accts = App.table([
       { h: 'Bank account', f: (p) => `${esc(p.label)}<div class="small muted">${esc(p.account.currency)}, GL ${App.link('acct', p.account.gl)}</div>` },
       { h: 'Book balance', num: true, f: (p) => fmt(p.book) },
@@ -123,7 +123,7 @@
           : `<button type="button" class="btn primary" disabled title="${r.priorOpen.length ? 'Reconcile earlier statements first' : 'Available when every line is matched and the difference is zero'}">Mark reconciled</button>`))
       + '</div></div>';
     const tone = Math.abs(r.difference) < 0.005 ? 'good' : 'warn';
-    const kpis = `<div class="kpis">${App.kpi('Statement closing', fmt(r.closing), fdate(r.end))}${App.kpi('Deposits in transit', fmt(r.ditTotal), `${r.depositsInTransit.length} item(s)`)}${App.kpi('Outstanding payments', fmt(r.opTotal), `${r.outstandingPayments.length} item(s)`)}${App.kpi('Book balance', fmt(r.book), `GL ${esc(r.account.gl)} at ${fdate(r.end)}`)}${App.kpi('Difference', `<span style="color:var(--${tone})">${fmt(r.difference)}</span>`, done ? 'Reconciled' : `${r.linesUnmatched} statement line(s) unmatched`)}</div>`;
+    const kpis = `<div class="kpis">${App.kpi('Statement closing', App.fmt0(r.closing), fdate(r.end))}${App.kpi('Deposits in transit', fmt(r.ditTotal), `${r.depositsInTransit.length} item(s)`)}${App.kpi('Outstanding payments', fmt(r.opTotal), `${r.outstandingPayments.length} item(s)`)}${App.kpi('Book balance', App.fmt0(r.book), `GL ${esc(r.account.gl)} at ${fdate(r.end)}`)}${App.kpi('Difference', `<span style="color:var(--${tone})">${fmt(r.difference)}</span>`, done ? 'Reconciled' : `${r.linesUnmatched} statement line(s) unmatched`)}</div>`;
     const status = done ? `<div class="callout good" style="margin-bottom:16px">${esc(st.id)} was reconciled by ${esc(st.reconciledBy)} on ${fdate(st.reconciledOn)}. Reopen it to change matches.</div>`
       : r.priorOpen.length ? `<div class="callout warn" style="margin-bottom:16px">Reconcile ${r.priorOpen.map((id) => App.link('bankstmt', id)).join(', ')} first. Statements reconcile in order.</div>` : '';
     const lines = App.table([

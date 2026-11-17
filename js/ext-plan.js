@@ -232,15 +232,27 @@
     meta.locked = true; meta.status = 'Approved'; meta.approvedBy = 'Theo Okafor'; meta.approvedOn = '2026-06-24'; meta.updatedBy = 'Avery Lin'; meta.updatedOn = '2026-06-20';
     E.log('Approved and locked plan version', BUDGET, `Revenue ${money(versionTotals(BUDGET).revenue)}`);
   });
-  E.on('seedFinal', (ctx) => {
+  // The forecast copies elapsed-month actuals, so it must run after every other module's seedFinal
+  // (later modules post history such as bank interest). seedSetup runs once all modules have loaded,
+  // so it (re)appends this hook at the end of the seedFinal list.
+  const seedForecast = (ctx) => {
     ctx.at('2026-11-10');
     const st = S(); const el = elapsedPeriods();
+    // Accounts other modules added (service revenue, bank fees, professional services...) get a budget
+    // at their elapsed run-rate, nudged deterministically by -8%..+8% so variances are realistic.
+    planAccounts().forEach((a) => {
+      if (planPeriods().some((p) => budgetAmount(BUDGET, a.code, p))) return;
+      const avg = el.length ? actual(a.code, el[0], el[el.length - 1]) / el.length : 0; if (!avg) return;
+      const nudge = 1 + ((+a.code % 17) - 8) / 100;
+      planPeriods().forEach((p) => put(BUDGET, a.code, p, r2(avg * nudge)));
+    });
     planAccounts().forEach((a) => planPeriods().forEach((p) => put(FORECAST, a.code, p, el.includes(p) ? r2(actual(a.code, p)) : budgetAmount(BUDGET, a.code, p))));
     // Sales expects the Pinecrest lab build-out to land in Q1: lift Jan-Mar revenue forecast.
     ['2027-01', '2027-02', '2027-03'].forEach((p) => { const x = r2(budgetAmount(FORECAST, '4000', p) * 1.06); put(FORECAST, '4000', p, x); put(FORECAST, '5000', p, r2(x * COGS_RATE)); });
     const meta = st.budgetVersions[FORECAST]; meta.updatedBy = 'Avery Lin'; meta.updatedOn = '2026-11-10';
     E.log('Copied actuals into plan', FORECAST, el.map(periodLabel).join(', '));
-  });
+  };
+  E.on('seedSetup', () => { const h = E.hooks.seedFinal, i = h.indexOf(seedForecast); if (i >= 0) h.splice(i, 1); h.push(seedForecast); });
 
   // ---------- hooks ----------
   E.on('checklist', (p) => {

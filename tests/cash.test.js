@@ -101,7 +101,7 @@ describe('cash management', () => {
     assert.ok(E.je(wire.matched).desc.includes(wire.ref));
     assert.equal(E.autoMatchStatement(s.id), 0);
     noDoubleMatch();
-    assert.ok(E.unreconciledCash().some((x) => x.desc === 'Duplicate rent test'));
+    assert.equal(E.unreconciledCash().filter((x) => x.amount === rentLine.amount && /rent/i.test(x.desc)).length, 1, 'exactly one of the two rent entries stays unmatched');
   });
 
   test('unmatch and rematch, with one-to-one and amount guards', () => {
@@ -182,12 +182,12 @@ describe('cash management', () => {
     assert.equal(r2(f.totals.receipts + f.totals.payments + f.totals.payroll + f.totals.rent), f.totals.net);
   });
 
-  test('hooks: search, permissions, reconcile row', () => {
+  test('hooks: search, permissions, bank-vs-book row', () => {
     assert.ok(E.search('BST-').some((h) => h.kind === 'bankstmt'));
     assert.ok(E.can('Controller', 'cash.reconcile'));
     assert.ok(E.can('AP Specialist', 'cash.reconcile'));
     assert.ok(!E.can('Buyer', 'cash.reconcile'));
-    const row = E.reconcile().find((r) => /Bank statement vs book/.test(r.name));
-    assert.ok(row && row.ok);
+    const rows = E.bankReconcileRows();
+    assert.ok(rows.length === 1 && Math.abs(rows[0].sub - rows[0].gl) < 0.005, 'last reconciled statement ties to book');
   });
 });
