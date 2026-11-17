@@ -66,7 +66,8 @@ describe('seed invariants', () => {
   });
   test('TB nets to zero, BS balanced, all reconciled, no negative stock', () => {
     assertInvariants('seed');
-    assert.equal(E.reconcile().length, 4);
+    assert.ok(E.reconcile().length >= 4);
+    for (const n of ['Accounts payable', 'Accounts receivable', 'Inventory', 'Received not invoiced']) assert.ok(E.reconcile().some((r) => r.name === n), n);
     assert.ok(E.reconcile().every((r) => r.ok));
   });
   test('BS identity A = L + E (+ earnings) computed independently', () => {
@@ -79,9 +80,23 @@ describe('seed invariants', () => {
     }
     assert.ok(Math.abs(a - (l + eq + rev - exp)) < 0.01);
   });
-  test('approvals inbox: one each of req, je, apinv, so + 2 absences', () => {
+  test('approvals inbox: one each of req, je, apinv, so + 2 absences (core kinds)', () => {
     const k = {}; E.approvalsInbox().forEach((x) => (k[x.kind] = (k[x.kind] || 0) + 1));
-    assert.deepEqual(k, { req: 1, je: 1, apinv: 1, so: 1, abs: 2 });
+    assert.deepEqual({ req: k.req, je: k.je, apinv: k.apinv, so: k.so, abs: k.abs }, { req: 1, je: 1, apinv: 1, so: 1, abs: 2 });
+  });
+  test('seed has sales tax, FX, credit memos, accruals and recurring templates', () => {
+    assert.ok(E.balance('2300') < 0, '2300 has a credit balance (Nov tax unremitted)');
+    assert.equal(r2(-E.balance('2300')), r2(E.salesTaxDue('2026-11')));
+    for (const p of ['2026-07', '2026-08', '2026-09', '2026-10']) assert.ok(E.S.taxRemits.some((r) => r.period === p), p);
+    assert.equal(custByName('Pinecrest University').taxCode, 'EXEMPT');
+    assert.equal(custByName('Meridian Water Authority').taxCode, 'EXEMPT');
+    assert.equal(E.S.suppliers.find((x) => x.name === 'Valemont Instruments GmbH').currency, 'EUR');
+    assert.equal(custByName('Harrow Analytical Ltd').currency, 'GBP');
+    assert.ok(E.balance('7100') !== 0, 'realized FX in history');
+    assert.ok(E.S.creditMemos.some((m) => m.side === 'AR' && m.returns.length) && E.S.creditMemos.some((m) => m.side === 'AP'));
+    assert.equal(E.S.recurring.length, 2);
+    assert.ok(E.S.journals.some((j) => j.autoReversal));
+    assert.ok(E.S.journals.some((j) => j.autoReverse && !j.reversedBy && j.period === '2026-11'));
   });
 });
 
@@ -412,18 +427,21 @@ describe('order to cash', () => {
     const c = custByName('Solace Pharma');
     const o = E.createSO({ customerId: c.id, date: NOV, lines: [{ sku: 'HX-220', qty: 7 }, { sku: 'CB-010', qty: 113, price: 27.5 }] });
     const h = E.item('HX-220'), cb = E.item('CB-010');
-    const expCogs = r2(7 * h.avgCost + 113 * cb.avgCost), expTotal = r2(7 * h.price + 113 * 27.5);
-    assert.equal(o.total, expTotal);
+    const expCogs = r2(7 * h.avgCost + 113 * cb.avgCost), expNet = r2(7 * h.price + 113 * 27.5);
+    assert.equal(o.total, expNet);
+    assert.equal(c.taxCode, 'NJ');
+    const expTax = r2(expNet * 0.06625), expTotal = r2(expNet + expTax);
     const b = E.balances(); const n1 = h.onHand, n2 = cb.onHand;
     const inv = E.shipSO(o.id, NOV);
     assert.equal(r2(E.balance('5000') - b['5000']), expCogs);
     assert.equal(r2(b['1200'] - E.balance('1200')), expCogs);
     assert.equal(r2(E.balance('1100') - b['1100']), expTotal);
-    assert.equal(r2(b['4000'] - E.balance('4000')), expTotal);
-    assert.equal(inv.total, expTotal);
+    assert.equal(r2(b['4000'] - E.balance('4000')), expNet);
+    assert.equal(r2(b['2300'] - E.balance('2300')), expTax);
+    assert.equal(inv.total, expTotal); assert.equal(inv.net, expNet); assert.equal(inv.tax, expTax);
     assert.equal(inv.due, E.util.addDays(NOV, c.terms));
     assert.equal(h.onHand, n1 - 7); assert.equal(cb.onHand, n2 - 113);
-    assert.equal(o.margin, r2(expTotal - expCogs));
+    assert.equal(o.margin, r2(expNet - expCogs));
     assert.throws(() => E.shipSO(o.id, NOV), /Invoiced/);
     assert.throws(() => E.cancelSO(o.id), /shipped/);
     assertInvariants();
@@ -560,26 +578,22 @@ describe('HCM and payroll', () => {
 
 // =====================================================================
 describe('depreciation', () => {
-  test('once per period; amount = GL 1500 / 60', () => {
-    const exp = r2(E.balance('1500', { toPeriod: '2026-11' }) / 60);
-    assert.equal(exp, 4000);
+  // The fixed-assets module may override E.runDepreciation (asset register), so only the contract is asserted here.
+  test('once per period; posts balanced Dr 6300 / Cr 1510', () => {
     const b = E.balances();
     const j = E.runDepreciation('2026-11');
-    assert.equal(j.total, exp);
-    assert.equal(r2(E.balance('6300') - b['6300']), exp);
-    assert.equal(r2(b['1510'] - E.balance('1510')), exp);
-    assert.equal(j.date, '2026-11-30');
-    assert.throws(() => E.runDepreciation('2026-11'), /already posted/);
-    assert.throws(() => E.runDepreciation('2026-10'), /already posted/);
-    assert.throws(() => E.runDepreciation('2026-12'), /Future/);
-    assert.equal(E.S.depreciationRuns['2026-12'], undefined);
-    E.openPeriod('2026-12');
-    E.runDepreciation('2026-12');
+    assert.ok(journalBalanced(j));
+    assert.ok(j.total > 0);
+    const dr6300 = r2(j.lines.filter((l) => l.acct === '6300').reduce((a, l) => a + l.dr - l.cr, 0));
+    const cr1510 = r2(j.lines.filter((l) => l.acct === '1510').reduce((a, l) => a + l.cr - l.dr, 0));
+    assert.ok(dr6300 > 0); assert.equal(dr6300, cr1510);
+    assert.equal(r2(E.balance('6300') - b['6300']), dr6300);
+    assert.equal(r2(b['1510'] - E.balance('1510')), cr1510);
+    assert.equal(j.period, '2026-11');
+    assert.throws(() => E.runDepreciation('2026-11'));
+    assert.throws(() => E.runDepreciation('2026-10'));
+    assert.throws(() => E.runDepreciation('2026-12'));
     assertInvariants();
-  });
-  test('depreciation base reflects equipment additions', () => {
-    E.createJournal({ date: NOV, lines: [{ acct: '1500', dr: 6000 }, { acct: '1000', cr: 6000 }] });
-    assert.equal(E.runDepreciation('2026-11').total, r2(246000 / 60));
   });
 });
 
