@@ -14,7 +14,7 @@ No build step and no dependencies.
 ```bash
 python3 -m http.server 8000
 ```
-Then open http://localhost:8000. You can also open `index.html` directly. Data lives in your browser's
+Then open http://localhost:8000. A hosted copy (private to the owner) is at https://claude.ai/artifact/Qhi6dYcipUkiKJZKoeHHsV. You can also open `index.html` directly. Data lives in your browser's
 localStorage; **Reset demo** in the top bar restores the sample company.
 
 Tests (Node 18+):

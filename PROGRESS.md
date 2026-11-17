@@ -17,7 +17,7 @@ Run `node --test tests/` and open index.html (or serve with `python3 -m http.ser
 
 ## Next
 - [x] Integrate agent output, fix reported engine bugs, full browser QA pass (desktop + 400px, light + dark)
-- [ ] Publish as artifact; push
+- [x] Published: https://claude.ai/artifact/Qhi6dYcipUkiKJZKoeHHsV (republish index.html + js/* with the same path to update)
 
 ## Known decisions
 - Today pinned to 2026-11-17 (deterministic demo). Fiscal year starts Jul-26.
